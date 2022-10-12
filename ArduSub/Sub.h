@@ -81,11 +81,14 @@
 #include <AP_RCMapper/AP_RCMapper.h>        // RC input mapping library
 #endif
 
-#if RPM_ENABLED == ENABLED
+#include <AP_RPM/AP_RPM_config.h>
+
+#if AP_RPM_ENABLED
 #include <AP_RPM/AP_RPM.h>
 #endif
 
-#if GRIPPER_ENABLED == ENABLED
+#include <AP_Gripper/AP_Gripper_config.h>
+#if AP_GRIPPER_ENABLED
 #include <AP_Gripper/AP_Gripper.h>             // gripper stuff
 #endif
 
@@ -93,13 +96,7 @@
 #include <AC_Avoidance/AC_Avoid.h>           // Stop at fence library
 #endif
 
-#if AC_RALLY == ENABLED
-#include <AP_Rally/AP_Rally.h>           // Rally point library
-#endif
-
-#if CAMERA == ENABLED
 #include <AP_Camera/AP_Camera.h>          // Photo or video camera
-#endif
 
 #if AP_SCRIPTING_ENABLED
 #include <AP_Scripting/AP_Scripting.h>
@@ -151,7 +148,7 @@ private:
         LowPassFilterFloat alt_cm_filt; // altitude filter
     } rangefinder_state = { false, false, 0, 0 };
 
-#if RPM_ENABLED == ENABLED
+#if AP_RPM_ENABLED
     AP_RPM rpm_sensor;
 #endif
 
@@ -163,7 +160,7 @@ private:
 
     // Optical flow sensor
 #if AP_OPTICALFLOW_ENABLED
-    OpticalFlow optflow;
+    AP_OpticalFlow optflow;
 #endif
 
     // system time in milliseconds of last recorded yaw reset from ekf
@@ -334,7 +331,7 @@ private:
     AC_Circle circle_nav;
 
     // Camera
-#if CAMERA == ENABLED
+#if AP_CAMERA_ENABLED
     AP_Camera camera{MASK_LOG_CAMERA};
 #endif
 
@@ -348,7 +345,7 @@ private:
 #endif
 
     // Rally library
-#if AC_RALLY == ENABLED
+#if HAL_RALLY_ENABLED
     AP_Rally rally;
 #endif
 

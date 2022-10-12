@@ -25,7 +25,6 @@
 #include <AP_Airspeed/AP_Airspeed.h>
 #include <AP_InertialSensor/AP_InertialSensor.h>
 
-class OpticalFlow;
 #define AP_AHRS_TRIM_LIMIT 10.0f        // maximum trim angle in degrees
 #define AP_AHRS_RP_P_MIN   0.05f        // minimum value for AHRS_RP_P parameter
 #define AP_AHRS_YAW_P_MIN  0.05f        // minimum value for AHRS_YAW_P parameter
@@ -56,8 +55,7 @@ public:
         Matrix3f dcm_matrix;
         Vector3f gyro_estimate;
         Vector3f gyro_drift;
-        Vector3f accel_ef[INS_MAX_INSTANCES];  // must be INS_MAX_INSTANCES
-        Vector3f accel_ef_blended;
+        Vector3f accel_ef;
         Vector3f accel_bias;
     };
 

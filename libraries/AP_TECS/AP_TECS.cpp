@@ -308,6 +308,7 @@ void AP_TECS::update_50hz(void)
         _height_filter.dd_height = 0.0f;
         DT            = 0.02f; // when first starting TECS, use a
         // small time constant
+        _vdot_filter.reset();
     }
     _update_50hz_last_usec = now;
 
@@ -391,12 +392,12 @@ void AP_TECS::_update_speed(float load_factor)
         // small time constant
     }
 
-    // Get airspeed or default to halfway between min and max if
-    // airspeed is not being used and set speed rate to zero
+    // Get measured airspeed or default to trim speed and constrain to range between min and max if
+    // airspeed sensor data cannot be used
     bool use_airspeed = _use_synthetic_airspeed_once || _use_synthetic_airspeed.get() || _ahrs.airspeed_sensor_enabled();
     if (!use_airspeed || !_ahrs.airspeed_estimate(_EAS)) {
         // If no airspeed available use average of min and max
-        _EAS = 0.5f * (aparm.airspeed_min.get() + (float)aparm.airspeed_max.get());
+        _EAS = constrain_float(0.01f * (float)aparm.airspeed_cruise_cm.get(), (float)aparm.airspeed_min.get(), (float)aparm.airspeed_max.get());
     }
 
     // Implement a second order complementary filter to obtain a

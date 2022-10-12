@@ -5,6 +5,8 @@
 #include <AP_Terrain/AP_Terrain.h>
 #include <GCS_MAVLink/GCS.h>
 #include <AP_AHRS/AP_AHRS.h>
+#include <AP_Camera/AP_Camera.h>
+#include <AP_Gripper/AP_Gripper_config.h>
 
 const AP_Param::GroupInfo AP_Mission::var_info[] = {
 
@@ -53,6 +55,9 @@ void AP_Mission::init()
     // check_eeprom_version - checks version of missions stored in eeprom matches this library
     // command list will be cleared if they do not match
     check_eeprom_version();
+
+    // initialize the jump tracking array
+    init_jump_tracking();
 
     // If Mission Clear bit is set then it should clear the mission, otherwise retain the mission.
     if (AP_MISSION_MASK_MISSION_CLEAR & _options) {
@@ -315,7 +320,9 @@ bool AP_Mission::verify_command(const Mission_Command& cmd)
 {
     switch (cmd.id) {
     // do-commands always return true for verify:
+#if AP_GRIPPER_ENABLED
     case MAV_CMD_DO_GRIPPER:
+#endif
     case MAV_CMD_DO_SET_SERVO:
     case MAV_CMD_DO_SET_RELAY:
     case MAV_CMD_DO_REPEAT_SERVO:
@@ -348,8 +355,10 @@ bool AP_Mission::start_command(const Mission_Command& cmd)
     switch (cmd.id) {
     case MAV_CMD_DO_AUX_FUNCTION:
         return start_command_do_aux_function(cmd);
+#if AP_GRIPPER_ENABLED
     case MAV_CMD_DO_GRIPPER:
         return start_command_do_gripper(cmd);
+#endif
     case MAV_CMD_DO_SET_SERVO:
     case MAV_CMD_DO_SET_RELAY:
     case MAV_CMD_DO_REPEAT_SERVO:
@@ -358,8 +367,10 @@ bool AP_Mission::start_command(const Mission_Command& cmd)
     case MAV_CMD_DO_CONTROL_VIDEO:
     case MAV_CMD_DO_DIGICAM_CONFIGURE:
     case MAV_CMD_DO_DIGICAM_CONTROL:
+#if AP_CAMERA_ENABLED
     case MAV_CMD_DO_SET_CAM_TRIGG_DIST:
         return start_command_camera(cmd);
+#endif
     case MAV_CMD_DO_PARACHUTE:
         return start_command_parachute(cmd);
     case MAV_CMD_DO_SEND_SCRIPT_MESSAGE:
@@ -1116,10 +1127,12 @@ MAV_MISSION_RESULT AP_Mission::mavlink_int_to_mission_cmd(const mavlink_mission_
         cmd.p1 = packet.param1;                         // normal=0 inverted=1
         break;
 
+#if AP_GRIPPER_ENABLED
     case MAV_CMD_DO_GRIPPER:                            // MAV ID: 211
         cmd.content.gripper.num = packet.param1;        // gripper number
         cmd.content.gripper.action = packet.param2;     // action 0=release, 1=grab.  See GRIPPER_ACTION enum
         break;
+#endif
 
     case MAV_CMD_DO_GUIDED_LIMITS:                      // MAV ID: 222
         cmd.p1 = packet.param1;                         // max time in seconds the external controller will be allowed to control the vehicle
@@ -1391,6 +1404,7 @@ MAV_MISSION_RESULT AP_Mission::mavlink_cmd_long_to_mission_cmd(const mavlink_com
 
 // mission_cmd_to_mavlink_int - converts an AP_Mission::Mission_Command object to a mavlink message which can be sent to the GCS
 //  return true on success, false on failure
+//  NOTE: callers to this method current fill parts of "packet" in before calling this method, so do NOT attempt to zero the entire packet in here
 bool AP_Mission::mission_cmd_to_mavlink_int(const AP_Mission::Mission_Command& cmd, mavlink_mission_item_int_t& packet)
 {
     // command's position in mission list and mavlink id
@@ -1403,6 +1417,7 @@ bool AP_Mission::mission_cmd_to_mavlink_int(const AP_Mission::Mission_Command& c
     packet.param2 = 0;
     packet.param3 = 0;
     packet.param4 = 0;
+    packet.frame = 0;
     packet.autocontinue = 1;
 
     // command specific conversions from mission command to mavlink packet
@@ -1608,10 +1623,12 @@ bool AP_Mission::mission_cmd_to_mavlink_int(const AP_Mission::Mission_Command& c
         packet.param1 = cmd.p1;                         // normal=0 inverted=1
         break;
 
+#if AP_GRIPPER_ENABLED
     case MAV_CMD_DO_GRIPPER:                            // MAV ID: 211
         packet.param1 = cmd.content.gripper.num;        // gripper number
         packet.param2 = cmd.content.gripper.action;     // action 0=release, 1=grab.  See GRIPPER_ACTION enum
         break;
+#endif
 
     case MAV_CMD_DO_GUIDED_LIMITS:                      // MAV ID: 222
         packet.param1 = cmd.p1;                         // max time in seconds the external controller will be allowed to control the vehicle
@@ -2417,8 +2434,10 @@ const char *AP_Mission::Mission_Command::type() const
         return "LandStart";
     case MAV_CMD_NAV_DELAY:
         return "Delay";
+#if AP_GRIPPER_ENABLED
     case MAV_CMD_DO_GRIPPER:
         return "Gripper";
+#endif
     case MAV_CMD_NAV_PAYLOAD_PLACE:
         return "PayloadPlace";
     case MAV_CMD_DO_PARACHUTE:

@@ -191,6 +191,19 @@ bool NavEKF3_core::getAirSpdVec(Vector3f &vel) const
     return true;
 }
 
+// return the innovation in m/s, innovation variance in (m/s)^2 and age in msec of the last TAS measurement processed
+// returns false if the data is unavailable
+bool NavEKF3_core::getAirSpdHealthData(float &innovation, float &innovationVariance, uint32_t &age_ms) const
+{
+    if (tasDataDelayed.time_ms == 0) {
+        // no data has been processed since startup
+        return false;
+    }
+    innovation = (float)innovVtas;
+    innovationVariance = (float)varInnovVtas;
+    age_ms = imuSampleTime_ms - tasDataDelayed.time_ms;
+    return true;
+}
 
 // Return the rate of change of vertical position in the down direction (dPosD/dt) of the body frame origin in m/s
 float NavEKF3_core::getPosDownDerivative(void) const
@@ -255,6 +268,12 @@ bool NavEKF3_core::getPosD(float &posD) const
         posD = outputDataNew.position.z + posOffsetNED.z + 0.01f * (float)EKF_origin.alt - (float)ekfGpsRefHgt;
     }
 
+    // adjust posD for difference between our origin and the public_origin
+    Location local_origin;
+    if (getOriginLLH(local_origin)) {
+        posD += (public_origin.alt - local_origin.alt) * 0.01;
+    }
+
     // Return the current height solution status
     return filterStatus.flags.vert_pos;
 
@@ -279,7 +298,7 @@ bool NavEKF3_core::getLLH(struct Location &loc) const
         float posD;
         if(getPosD(posD) && PV_AidingMode != AID_NONE) {
             // Altitude returned is an absolute altitude relative to the WGS-84 spherioid
-            loc.set_alt_cm(origin.alt - posD*100, Location::AltFrame::ABSOLUTE);
+            loc.set_alt_cm(origin.alt - posD*100.0, Location::AltFrame::ABSOLUTE);
             if (filterStatus.flags.horiz_pos_abs || filterStatus.flags.horiz_pos_rel) {
                 // The EKF is able to provide a position estimate
                 loc.lat = EKF_origin.lat;
@@ -309,6 +328,7 @@ bool NavEKF3_core::getLLH(struct Location &loc) const
                 loc.lng = EKF_origin.lng;
                 loc.offset(lastKnownPositionNE.x + posOffsetNED.x,
                            lastKnownPositionNE.y + posOffsetNED.y);
+                loc.alt = EKF_origin.alt - lastKnownPositionD*100.0;
                 return false;
             }
         }

@@ -35,6 +35,10 @@ extern const AP_HAL::HAL &hal;
 #define AP_PERIPH_ESC_TELEM_PORT_DEFAULT -1
 #endif
 
+#ifndef AP_PERIPH_ESC_TELEM_RATE_DEFAULT
+#define AP_PERIPH_ESC_TELEM_RATE_DEFAULT 50
+#endif
+
 #ifndef AP_PERIPH_BARO_ENABLE_DEFAULT
 #define AP_PERIPH_BARO_ENABLE_DEFAULT 1
 #endif
@@ -87,6 +91,16 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @User: Advanced
     // @RebootRequired: True
     GARRAY(can_baudrate,     0, "CAN_BAUDRATE", 1000000),
+
+#ifdef HAL_PERIPH_ENABLE_SLCAN
+    // @Param: CAN_SLCAN_CPORT
+    // @DisplayName: SLCAN Route
+    // @Description: CAN Interface ID to be routed to SLCAN, 0 means no routing
+    // @Values: 0:Disabled,1:First interface,2:Second interface
+    // @User: Standard
+    // @RebootRequired: True
+    GSCALAR(can_slcan_cport, "CAN_SLCAN_CPORT", 1),
+#endif
 
 #if HAL_NUM_CAN_IFACES >= 2
     // @Param: CAN_PROTOCOL
@@ -368,6 +382,17 @@ const AP_Param::Info AP_Periph_FW::var_info[] = {
     // @User: Advanced
     // @RebootRequired: True
     GSCALAR(esc_telem_port, "ESC_TELEM_PORT", AP_PERIPH_ESC_TELEM_PORT_DEFAULT),
+#endif
+
+#if HAL_WITH_ESC_TELEM
+    // @Param: ESC_TELEM_RATE
+    // @DisplayName: ESC Telemetry update rate
+    // @Description: This is the rate at which ESC Telemetry will be sent across the CAN bus
+    // @Range: 0 1000
+    // @Increment: 1
+    // @User: Advanced
+    // @RebootRequired: True
+    GSCALAR(esc_telem_rate, "ESC_TELEM_RATE", AP_PERIPH_ESC_TELEM_RATE_DEFAULT),
 #endif
 #endif
 

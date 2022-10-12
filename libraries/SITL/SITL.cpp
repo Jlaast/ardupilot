@@ -285,6 +285,8 @@ const AP_Param::GroupInfo SIM::var_info3[] = {
 
     AP_GROUPINFO("ESC_TELEM", 40, SIM, esc_telem, 1),
 
+    AP_GROUPINFO("ESC_ARM_RPM", 41, SIM,  esc_rpm_armed, 0.0f),
+
     AP_SUBGROUPINFO(airspeed[0], "ARSPD_", 50, SIM, SIM::AirspeedParm),
 #if AIRSPEED_MAX_SENSORS > 1
     AP_SUBGROUPINFO(airspeed[1], "ARSPD2_", 51, SIM, SIM::AirspeedParm),
@@ -661,7 +663,7 @@ Vector3f SIM::convert_earth_frame(const Matrix3f &dcm, const Vector3f &gyro)
 
 // get the rangefinder reading for the desired rotation, returns -1 for no data
 float SIM::get_rangefinder(uint8_t instance) {
-    if (instance < RANGEFINDER_MAX_INSTANCES) {
+    if (instance < ARRAY_SIZE(state.rangefinder_m)) {
         return state.rangefinder_m[instance];
     }
     return -1;

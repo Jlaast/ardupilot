@@ -70,8 +70,7 @@ public:
     }
 
     /* Do not allow copies */
-    AP_Vehicle(const AP_Vehicle &other) = delete;
-    AP_Vehicle &operator=(const AP_Vehicle&) = delete;
+    CLASS_NO_COPY(AP_Vehicle);
 
     static AP_Vehicle *get_singleton();
 
@@ -292,10 +291,8 @@ public:
      */
     virtual bool get_pan_tilt_norm(float &pan_norm, float &tilt_norm) const { return false; }
 
-#if OSD_ENABLED
    // Returns roll and  pitch for OSD Horizon, Plane overrides to correct for VTOL view and fixed wing TRIM_PITCH_CD
     virtual void get_osd_roll_pitch_rad(float &roll, float &pitch) const;
-#endif
 
     /*
      get the target body-frame angular velocities in rad/s (Z-axis component used by some gimbals)
@@ -447,6 +444,10 @@ private:
     // run notch update at either loop rate or 200Hz
     void update_dynamic_notch_at_specified_rate();
 
+    // decimation for 1Hz update
+    uint8_t one_Hz_counter;
+    void one_Hz_update();
+
     bool likely_flying;         // true if vehicle is probably flying
     uint32_t _last_flying_ms;   // time when likely_flying last went true
     uint32_t _last_notch_update_ms[HAL_INS_NUM_HARMONIC_NOTCH_FILTERS]; // last time update_dynamic_notch() was run
@@ -454,6 +455,7 @@ private:
     static AP_Vehicle *_singleton;
 
     bool done_safety_init;
+
 
     uint32_t _last_internal_errors;  // backup of AP_InternalError::internal_errors bitmask
 

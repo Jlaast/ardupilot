@@ -26,7 +26,6 @@
 #include "SIM_IntelligentEnergy24.h"
 #include "SIM_Ship.h"
 #include "SIM_GPS.h"
-#include <AP_RangeFinder/AP_RangeFinder.h>
 
 namespace SITL {
 
@@ -78,7 +77,8 @@ struct sitl_fdm {
         struct float_array ranges;
     } scanner;
 
-    float rangefinder_m[RANGEFINDER_MAX_INSTANCES];
+    #define SITL_NUM_RANGEFINDERS 10
+    float rangefinder_m[SITL_NUM_RANGEFINDERS];
     float airspeed_raw_pressure[AIRSPEED_MAX_SENSORS];
 
     struct {
@@ -127,8 +127,7 @@ public:
     }
 
     /* Do not allow copies */
-    SIM(const SIM &other) = delete;
-    SIM &operator=(const SIM&) = delete;
+    CLASS_NO_COPY(SIM);
 
     static SIM *_singleton;
     static SIM *get_singleton() { return _singleton; }
@@ -441,6 +440,8 @@ public:
 
     // ESC telemetry
     AP_Int8 esc_telem;
+    // RPM when motors are armed
+    AP_Float esc_rpm_armed;
 
     struct {
         // LED state, for serial LED emulation

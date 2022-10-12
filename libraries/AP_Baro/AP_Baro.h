@@ -46,8 +46,7 @@ public:
     AP_Baro();
 
     /* Do not allow copies */
-    AP_Baro(const AP_Baro &other) = delete;
-    AP_Baro &operator=(const AP_Baro&) = delete;
+    CLASS_NO_COPY(AP_Baro);
 
     // get singleton
     static AP_Baro *get_singleton(void) {
@@ -292,6 +291,8 @@ private:
     // when did we last notify the GCS of new pressure reference?
     uint32_t                            _last_notify_ms;
 
+    // see if we already have probed a i2c driver by bus number and address
+    bool _have_i2c_driver(uint8_t bus_num, uint8_t address) const;
     bool _add_backend(AP_Baro_Backend *backend);
     void _probe_i2c_barometers(void);
     AP_Int8                            _filter_range;  // valid value range from mean value

@@ -155,6 +155,10 @@ public:
     // returns false if estimate is unavailable
     bool airspeed_vector_true(Vector3f &vec) const;
 
+    // return the innovation in m/s, innovation variance in (m/s)^2 and age in msec of the last TAS measurement processed
+    // returns false if the data is unavailable
+    bool airspeed_health_data(float &innovation, float &innovationVariance, uint32_t &age_ms) const;
+
     // return true if airspeed comes from an airspeed sensor, as
     // opposed to an IMU estimate
     bool airspeed_sensor_enabled(void) const;
@@ -193,14 +197,12 @@ public:
     // return ground speed estimate in meters/second. Used by ground vehicles.
     float groundspeed(void);
 
-    const Vector3f &get_accel_ef(uint8_t i) const;
-    const Vector3f &get_accel_ef() const;
+    const Vector3f &get_accel_ef() const {
+        return _accel_ef;
+    }
 
     // Retrieves the corrected NED delta velocity in use by the inertial navigation
     void getCorrectedDeltaVelocityNED(Vector3f& ret, float& dt) const;
-
-    // blended accelerometer values in the earth frame in m/s/s
-    const Vector3f &get_accel_ef_blended() const;
 
     // set the EKF's origin location in 10e7 degrees.  This should only
     // be called when the EKF has no absolute position reference (i.e. GPS)
@@ -359,6 +361,9 @@ public:
 
     // set position, velocity and yaw sources to either 0=primary, 1=secondary, 2=tertiary
     void set_posvelyaw_source_set(uint8_t source_set_idx);
+
+    //returns index of active source set used, 0=primary, 1=secondary, 2=tertiary
+    uint8_t get_posvelyaw_source_set() const;
 
     void Log_Write();
 
@@ -707,8 +712,7 @@ private:
 
     Vector3f _gyro_drift;
     Vector3f _gyro_estimate;
-    Vector3f _accel_ef_ekf[INS_MAX_INSTANCES];
-    Vector3f _accel_ef_ekf_blended;
+    Vector3f _accel_ef;
     Vector3f _accel_bias;
 
     const uint16_t startup_delay_ms = 1000;

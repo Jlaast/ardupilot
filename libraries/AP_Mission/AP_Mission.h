@@ -12,11 +12,7 @@
  */
 #pragma once
 
-#include <AP_HAL/AP_HAL.h>
-
-#ifndef HAL_MISSION_ENABLED
-#define HAL_MISSION_ENABLED 1
-#endif
+#include "AP_Mission_config.h"
 
 #include <GCS_MAVLink/GCS_MAVLink.h>
 #include <AP_Math/AP_Math.h>
@@ -387,8 +383,7 @@ public:
     }
 
     /* Do not allow copies */
-    AP_Mission(const AP_Mission &other) = delete;
-    AP_Mission &operator=(const AP_Mission&) = delete;
+    CLASS_NO_COPY(AP_Mission);
 
     // mission state enumeration
     enum mission_state {

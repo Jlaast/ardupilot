@@ -80,7 +80,6 @@
 #include <AP_Parachute/AP_Parachute.h>
 #include <AP_ADSB/AP_ADSB.h>
 #include <AP_ICEngine/AP_ICEngine.h>
-#include <AP_Gripper/AP_Gripper.h>
 #include <AP_Landing/AP_Landing.h>
 #include <AP_LandingGear/AP_LandingGear.h>     // Landing Gear library
 #include <AP_Follow/AP_Follow.h>
@@ -194,7 +193,9 @@ private:
 
     AP_Vehicle::FixedWing::Rangefinder_State rangefinder_state;
 
+#if AP_RPM_ENABLED
     AP_RPM rpm_sensor;
+#endif
 
     AP_TECS TECS_controller{ahrs, aparm, landing, MASK_LOG_TECS};
     AP_L1_Control L1_controller{ahrs, &TECS_controller};
@@ -234,13 +235,13 @@ private:
     AP_Navigation *nav_controller = &L1_controller;
 
     // Camera
-#if CAMERA == ENABLED
+#if AP_CAMERA_ENABLED
     AP_Camera camera{MASK_LOG_CAMERA};
 #endif
 
 #if AP_OPTICALFLOW_ENABLED
     // Optical flow sensor
-    OpticalFlow optflow;
+    AP_OpticalFlow optflow;
 #endif
 
     // Rally Ponints
@@ -878,7 +879,6 @@ private:
     void Log_Write_RC(void);
     void Log_Write_Vehicle_Startup_Messages();
     void Log_Write_AETR();
-    void Log_Write_MavCmdI(const mavlink_command_int_t &packet);
     void log_init();
 
     // Parameters.cpp
@@ -979,13 +979,12 @@ private:
     // fence.cpp
     void fence_check();
     bool fence_stickmixing() const;
+    bool in_fence_recovery() const;
 #endif
 
     // ArduPlane.cpp
     void disarm_if_autoland_complete();
-# if OSD_ENABLED
     void get_osd_roll_pitch_rad(float &roll, float &pitch) const override;
-#endif
     float tecs_hgt_afe(void);
     void efi_update(void);
     void get_scheduler_tasks(const AP_Scheduler::Task *&tasks,

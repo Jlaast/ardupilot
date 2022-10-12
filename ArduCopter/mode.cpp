@@ -139,7 +139,7 @@ Mode *Copter::mode_from_mode_num(const Mode::Number mode)
             break;
 #endif
 
-#if AP_OPTICALFLOW_ENABLED
+#if MODE_FLOWHOLD_ENABLED == ENABLED
         case Mode::Number::FLOWHOLD:
             ret = (Mode *)g2.mode_flowhold_ptr;
             break;
@@ -292,7 +292,7 @@ bool Copter::set_mode(Mode::Number mode, ModeReason reason)
     }
 
     if (!new_flightmode->init(ignore_checks)) {
-        mode_change_failed(new_flightmode, "initialisation failed");
+        mode_change_failed(new_flightmode, "init failed");
         return false;
     }
 
@@ -319,7 +319,7 @@ bool Copter::set_mode(Mode::Number mode, ModeReason reason)
     fence.manual_recovery_start();
 #endif
 
-#if CAMERA == ENABLED
+#if AP_CAMERA_ENABLED
     camera.set_is_auto_mode(flightmode->mode_number() == Mode::Number::AUTO);
 #endif
 
@@ -609,11 +609,13 @@ void Mode::land_run_vertical_control(bool pause_descent)
             }
             // check if we should descend or not
             const float max_horiz_pos_error_cm = copter.precland.get_max_xy_error_before_descending_cm();
+            Vector3f target_pos_meas;
+            copter.precland.get_target_position_measurement_cm(target_pos_meas);
             if (target_error_cm > max_horiz_pos_error_cm && !is_zero(max_horiz_pos_error_cm)) {
                 // doing precland but too far away from the obstacle
                 // do not descend
                 cmb_rate = 0.0f;
-            } else if (copter.rangefinder_alt_ok() && copter.rangefinder_state.alt_cm > 35.0f && copter.rangefinder_state.alt_cm < 200.0f) {
+            } else if (target_pos_meas.z > 35.0f && target_pos_meas.z < 200.0f) {
                 // very close to the ground and doing prec land, lets slow down to make sure we land on target
                 // compute desired descent velocity
                 const float precland_acceptable_error_cm = 15.0f;
@@ -1010,14 +1012,6 @@ void Mode::set_land_complete(bool b)
 GCS_Copter &Mode::gcs()
 {
     return copter.gcs();
-}
-
-// set_throttle_takeoff - allows modes to tell throttle controller we
-// are taking off so I terms can be cleared
-void Mode::set_throttle_takeoff()
-{
-    // initialise the vertical position controller
-    pos_control->init_z_controller();
 }
 
 uint16_t Mode::get_pilot_speed_dn()

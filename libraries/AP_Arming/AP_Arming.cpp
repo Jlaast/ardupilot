@@ -124,7 +124,7 @@ const AP_Param::GroupInfo AP_Arming::var_info[] = {
     // @Param: MIS_ITEMS
     // @DisplayName: Required mission items
     // @Description: Bitmask of mission items that are required to be planned in order to arm the aircraft
-    // @Bitmask: 0:Land,1:VTOL Land,2:DO_LAND_START,3:Takeoff,4:VTOL Takeoff,5:Rallypoint
+    // @Bitmask: 0:Land,1:VTOL Land,2:DO_LAND_START,3:Takeoff,4:VTOL Takeoff,5:Rallypoint,6:RTL
     // @User: Advanced
     AP_GROUPINFO("MIS_ITEMS",    7,     AP_Arming, _required_mission_items, 0),
 
@@ -136,12 +136,12 @@ const AP_Param::GroupInfo AP_Arming::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("CHECK",        8,     AP_Arming,  checks_to_perform,       ARMING_CHECK_ALL),
 
-    // @Param{Copter}: OPTIONS
+    // @Param: OPTIONS
     // @DisplayName: Arming options
     // @Description: Options that can be applied to change arming behaviour
     // @Values: 0:None,1:Disable prearm display
     // @User: Advanced
-    AP_GROUPINFO_FRAME("OPTIONS", 9,   AP_Arming, _arming_options, 0, AP_PARAM_FRAME_COPTER),
+    AP_GROUPINFO("OPTIONS", 9,   AP_Arming, _arming_options, 0),
 
     AP_GROUPEND
 };
@@ -473,6 +473,7 @@ bool AP_Arming::compass_checks(bool report)
 {
     Compass &_compass = AP::compass();
 
+#if COMPASS_CAL_ENABLED
     // check if compass is calibrating
     if (_compass.is_calibrating()) {
         check_failed(report, "Compass calibration running");
@@ -484,6 +485,7 @@ bool AP_Arming::compass_checks(bool report)
         check_failed(report, "Compass calibrated requires reboot");
         return false;
     }
+#endif
 
     if ((checks_to_perform) & ARMING_CHECK_ALL ||
         (checks_to_perform) & ARMING_CHECK_COMPASS) {
@@ -779,30 +781,29 @@ bool AP_Arming::mission_checks(bool report)
         AP_Mission *mission = AP::mission();
         if (mission == nullptr) {
             check_failed(ARMING_CHECK_MISSION, report, "No mission library present");
-            #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-                AP_HAL::panic("Mission checks requested, but no mission was allocated");
-            #endif // CONFIG_HAL_BOARD == HAL_BOARD_SITL
             return false;
         }
+#if HAL_RALLY_ENABLED
         AP_Rally *rally = AP::rally();
         if (rally == nullptr) {
             check_failed(ARMING_CHECK_MISSION, report, "No rally library present");
-            #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-                AP_HAL::panic("Mission checks requested, but no rally was allocated");
-            #endif // CONFIG_HAL_BOARD == HAL_BOARD_SITL
             return false;
         }
+#else
+        check_failed(ARMING_CHECK_MISSION, report, "No rally library present");
+#endif
 
         const struct MisItemTable {
           MIS_ITEM_CHECK check;
           MAV_CMD mis_item_type;
           const char *type;
-        } misChecks[5] = {
+        } misChecks[] = {
           {MIS_ITEM_CHECK_LAND,          MAV_CMD_NAV_LAND,           "land"},
           {MIS_ITEM_CHECK_VTOL_LAND,     MAV_CMD_NAV_VTOL_LAND,      "vtol land"},
           {MIS_ITEM_CHECK_DO_LAND_START, MAV_CMD_DO_LAND_START,      "do land start"},
           {MIS_ITEM_CHECK_TAKEOFF,       MAV_CMD_NAV_TAKEOFF,        "takeoff"},
           {MIS_ITEM_CHECK_VTOL_TAKEOFF,  MAV_CMD_NAV_VTOL_TAKEOFF,   "vtol takeoff"},
+          {MIS_ITEM_CHECK_RETURN_TO_LAUNCH,  MAV_CMD_NAV_RETURN_TO_LAUNCH,   "RTL"},
         };
         for (uint8_t i = 0; i < ARRAY_SIZE(misChecks); i++) {
             if (_required_mission_items & misChecks[i].check) {
@@ -812,6 +813,7 @@ bool AP_Arming::mission_checks(bool report)
                 }
             }
         }
+#if HAL_RALLY_ENABLED
         if (_required_mission_items & MIS_ITEM_CHECK_RALLY) {
             Location ahrs_loc;
             if (!AP::ahrs().get_location(ahrs_loc)) {
@@ -824,6 +826,7 @@ bool AP_Arming::mission_checks(bool report)
                 return false;
             }
           }
+#endif
     }
 
     return true;
@@ -886,7 +889,7 @@ bool AP_Arming::servo_checks(bool report) const
     }
 
 #if HAL_WITH_IO_MCU
-    if (!iomcu.healthy()) {
+    if (!iomcu.healthy() && AP_BoardConfig::io_enabled()) {
         check_failed(report, "IOMCU is unhealthy");
         check_passed = false;
     }
@@ -951,6 +954,8 @@ bool AP_Arming::heater_min_temperature_checks(bool report)
  */
 bool AP_Arming::system_checks(bool report)
 {
+    char buffer[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1] {};
+
     if (check_enabled(ARMING_CHECK_SYSTEM)) {
         if (!hal.storage->healthy()) {
             check_failed(ARMING_CHECK_SYSTEM, report, "Param storage failed");
@@ -965,8 +970,8 @@ bool AP_Arming::system_checks(bool report)
 #endif
 #if AP_SCRIPTING_ENABLED
         const AP_Scripting *scripting = AP_Scripting::get_singleton();
-        if ((scripting != nullptr) && scripting->enabled() && scripting->init_failed()) {
-            check_failed(ARMING_CHECK_SYSTEM, report, "Scripting out of memory");
+        if ((scripting != nullptr) && !scripting->arming_checks(sizeof(buffer), buffer)) {
+            check_failed(ARMING_CHECK_SYSTEM, report, "%s", buffer);
             return false;
         }
 #endif
@@ -979,19 +984,19 @@ bool AP_Arming::system_checks(bool report)
 #endif
     }
     if (AP::internalerror().errors() != 0) {
-        uint8_t buffer[32];
-        AP::internalerror().errors_as_string(buffer, ARRAY_SIZE(buffer));
+        AP::internalerror().errors_as_string((uint8_t*)buffer, ARRAY_SIZE(buffer));
         check_failed(report, "Internal errors 0x%x l:%u %s", (unsigned int)AP::internalerror().errors(), AP::internalerror().last_error_line(), buffer);
         return false;
     }
 
     if (check_enabled(ARMING_CHECK_PARAMETERS)) {
+#if AP_RPM_ENABLED
         auto *rpm = AP::rpm();
-        char buffer[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1] {};
         if (rpm && !rpm->arming_checks(sizeof(buffer), buffer)) {
             check_failed(ARMING_CHECK_PARAMETERS, report, "%s", buffer);
             return false;
         }
+#endif
         auto *relay = AP::relay();
         if (relay && !relay->arming_checks(sizeof(buffer), buffer)) {
             check_failed(ARMING_CHECK_PARAMETERS, report, "%s", buffer);
@@ -1078,15 +1083,12 @@ bool AP_Arming::proximity_checks(bool report) const
     if (proximity == nullptr) {
         return true;
     }
-    if (proximity->get_status() == AP_Proximity::Status::NotConnected) {
-        return true;
-    }
-
-    // return false if proximity sensor unhealthy
-    if (proximity->get_status() < AP_Proximity::Status::Good) {
-        check_failed(report, "check proximity sensor");
+    char buffer[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
+    if (!proximity->prearm_healthy(buffer, ARRAY_SIZE(buffer))) {
+        check_failed(report, "%s", buffer);
         return false;
     }
+    return true;
 #endif
 
     return true;
@@ -1094,7 +1096,7 @@ bool AP_Arming::proximity_checks(bool report) const
 
 bool AP_Arming::can_checks(bool report)
 {
-#if HAL_MAX_CAN_PROTOCOL_DRIVERS
+#if HAL_MAX_CAN_PROTOCOL_DRIVERS && HAL_CANMANAGER_ENABLED
     if (check_enabled(ARMING_CHECK_SYSTEM)) {
         char fail_msg[50] = {};
         (void)fail_msg; // might be left unused

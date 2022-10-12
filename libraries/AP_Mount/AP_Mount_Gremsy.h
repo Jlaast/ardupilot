@@ -22,7 +22,7 @@ class AP_Mount_Gremsy : public AP_Mount_Backend
 
 public:
     // Constructor
-    AP_Mount_Gremsy(AP_Mount &frontend, AP_Mount::mount_state &state, uint8_t instance);
+    AP_Mount_Gremsy(AP_Mount &frontend, AP_Mount_Params &params, uint8_t instance);
 
     // init
     void init() override {}
@@ -34,7 +34,7 @@ public:
     bool healthy() const override;
 
     // has_pan_control
-    bool has_pan_control() const override { return true; }
+    bool has_pan_control() const override { return yaw_range_valid(); }
 
     // handle GIMBAL_DEVICE_INFORMATION message
     void handle_gimbal_device_information(const mavlink_message_t &msg) override;

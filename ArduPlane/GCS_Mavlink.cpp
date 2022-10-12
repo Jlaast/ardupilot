@@ -1,6 +1,7 @@
 #include "GCS_Mavlink.h"
 
 #include "Plane.h"
+#include <AP_RPM/AP_RPM_config.h>
 
 MAV_TYPE GCS_Plane::frame_type() const
 {
@@ -567,7 +568,9 @@ static const ap_message STREAM_EXTRA1_msgs[] = {
     MSG_ATTITUDE,
     MSG_SIMSTATE,
     MSG_AHRS2,
+#if AP_RPM_ENABLED
     MSG_RPM,
+#endif
     MSG_AOA_SSA,
     MSG_PID_TUNING,
     MSG_LANDING,
@@ -579,7 +582,6 @@ static const ap_message STREAM_EXTRA2_msgs[] = {
 };
 static const ap_message STREAM_EXTRA3_msgs[] = {
     MSG_AHRS,
-    MSG_HWSTATUS,
     MSG_WIND,
     MSG_RANGEFINDER,
     MSG_DISTANCE_SENSOR,
@@ -722,6 +724,11 @@ MAV_RESULT GCS_MAVLINK_Plane::handle_command_int_do_reposition(const mavlink_com
         }
 
         plane.set_guided_WP(requested_position);
+
+        // Loiter radius for planes. Positive radius in meters, direction is controlled by Yaw (param4) value, parsed above
+        if (!isnan(packet.param3) && packet.param3 > 0) {
+            plane.mode_guided.set_radius_and_direction(packet.param3, requested_position.loiter_ccw);
+        }
 
         return MAV_RESULT_ACCEPTED;
     }
@@ -878,9 +885,6 @@ MAV_RESULT GCS_MAVLINK_Plane::handle_command_int_guided_slew_commands(const mavl
 
 MAV_RESULT GCS_MAVLINK_Plane::handle_command_int_packet(const mavlink_command_int_t &packet)
 {
-
-    plane.Log_Write_MavCmdI(packet);
-
     switch(packet.command) {
 
     case MAV_CMD_DO_REPOSITION:

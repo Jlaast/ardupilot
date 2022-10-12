@@ -2,6 +2,7 @@
 
 #include "GCS_Mavlink.h"
 
+#include <AP_RPM/AP_RPM_config.h>
 #include <AP_RangeFinder/AP_RangeFinder_Backend.h>
 
 MAV_TYPE GCS_Rover::frame_type() const
@@ -553,7 +554,6 @@ static const ap_message STREAM_EXTRA2_msgs[] = {
 };
 static const ap_message STREAM_EXTRA3_msgs[] = {
     MSG_AHRS,
-    MSG_HWSTATUS,
     MSG_WIND,
     MSG_RANGEFINDER,
     MSG_DISTANCE_SENSOR,
@@ -565,7 +565,9 @@ static const ap_message STREAM_EXTRA3_msgs[] = {
     MSG_MAG_CAL_PROGRESS,
     MSG_EKF_STATUS_REPORT,
     MSG_VIBRATION,
+#if AP_RPM_ENABLED
     MSG_RPM,
+#endif
     MSG_WHEEL_DISTANCE,
     MSG_ESC_TELEMETRY,
 };
@@ -1072,6 +1074,15 @@ void GCS_MAVLINK_Rover::handle_radio(const mavlink_message_t &msg)
     handle_radio_status(msg, rover.should_log(MASK_LOG_PM));
 }
 
+/*
+  handle a LANDING_TARGET command. The timestamp has been jitter corrected
+*/
+void GCS_MAVLINK_Rover::handle_landing_target(const mavlink_landing_target_t &packet, uint32_t timestamp_ms)
+{
+#if PRECISION_LANDING == ENABLED
+    rover.precland.handle_msg(packet, timestamp_ms);
+#endif
+}
 
 uint64_t GCS_MAVLINK_Rover::capabilities() const
 {
