@@ -550,6 +550,9 @@ Mode *Rover::mode_from_mode_num(const enum Mode::Number num)
     case Mode::Number::INITIALISING:
         ret = &mode_initializing;
         break;
+    case Mode::Number::RLG:
+        ret = &mode_rlg;
+        break;       
 #if MODE_DOCK_ENABLED == ENABLED
     case Mode::Number::DOCK:
         ret = (Mode *)g2.mode_dock_ptr;
