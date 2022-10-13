@@ -90,6 +90,7 @@ public:
     friend class ModeSmartRTL;
     friend class ModeFollow;
     friend class ModeSimple;
+    friend class ModeRLG;
 #if MODE_DOCK_ENABLED == ENABLED
     friend class ModeDock;
 #endif
@@ -235,6 +236,7 @@ private:
     ModeSmartRTL mode_smartrtl;
     ModeFollow mode_follow;
     ModeSimple mode_simple;
+    ModeRLG mode_rlg;
 #if MODE_DOCK_ENABLED == ENABLED
     ModeDock mode_dock;
 #endif
