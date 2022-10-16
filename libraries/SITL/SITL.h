@@ -63,8 +63,8 @@ struct sitl_fdm {
     double battery_current; // Amps
     double battery_remaining; // Ah, if non-zero capacity
     uint8_t num_motors;
-    uint8_t vtol_motor_start;
-    float rpm[12];         // RPM of all motors
+    uint32_t motor_mask;
+    float rpm[32];         // RPM of all motors
     uint8_t rcin_chan_count;
     float  rcin[12];         // RC input 0..1
     double range;           // rangefinder value
@@ -336,6 +336,9 @@ public:
     // what harmonics to generate
     AP_Int16 vibe_motor_harmonics;
 
+    // what servos are motors
+    AP_Int32 vibe_motor_mask;
+    
     // minimum throttle for addition of ins noise
     AP_Float ins_noise_throttle_min;
 
