@@ -529,7 +529,7 @@ void AP_UAVCAN::SRV_send_actuator(void)
                 cmd.actuator_id = starting_servo + 1;
 
                 if (option_is_set(Options::USE_ACTUATOR_PWM)) {
-                    cmd.command_type = uavcan::equipment::actuator::Command::COMMAND_TYPE_PWM;
+                    cmd.command_type = uavcan::equipment::actuator::Command::COMMAND_TYPE_UNITLESS;
                     cmd.command_value = _SRV_conf[starting_servo].pulse;
                 } else {
                     cmd.command_type = uavcan::equipment::actuator::Command::COMMAND_TYPE_UNITLESS;
