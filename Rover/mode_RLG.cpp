@@ -2,6 +2,7 @@
 
 void ModeRLG::update()
 {
+    gcs().send_text(MAV_SEVERITY_CRITICAL,"ModeRLG Hello Purple Team ! %5.3f",(double)3.142f);
     // get speed forward
     float speed, desired_steering;
     if (!attitude_control.get_forward_speed(speed)) {
