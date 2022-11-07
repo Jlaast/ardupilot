@@ -51,6 +51,7 @@
 #include <AP_ExternalAHRS/AP_ExternalAHRS.h>
 #include <AP_VideoTX/AP_SmartAudio.h>
 #include <AP_VideoTX/AP_Tramp.h>
+#include <AP_TemperatureSensor/AP_TemperatureSensor.h>
 #include <SITL/SITL.h>
 #include <AP_CustomRotations/AP_CustomRotations.h>
 #include <AP_AIS/AP_AIS.h>
@@ -229,7 +230,7 @@ public:
     virtual bool set_desired_speed(float speed) { return false; }
 
     // support for NAV_SCRIPT_TIME mission command
-    virtual bool nav_script_time(uint16_t &id, uint8_t &cmd, float &arg1, float &arg2) { return false; }
+    virtual bool nav_script_time(uint16_t &id, uint8_t &cmd, float &arg1, float &arg2, int16_t &arg3, int16_t &arg4) { return false; }
     virtual void nav_script_time_done(uint16_t id) {}
 
     // allow for VTOL velocity matching of a target
@@ -403,6 +404,10 @@ protected:
 
 #if AP_FENCE_ENABLED
     AC_Fence fence;
+#endif
+
+#if AP_TEMPERATURE_SENSOR_ENABLED
+    AP_TemperatureSensor temperature_sensor;
 #endif
 
     static const struct AP_Param::GroupInfo var_info[];

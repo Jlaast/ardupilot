@@ -277,13 +277,7 @@ void Plane::update_logging25(void)
 #if ADVANCED_FAILSAFE == ENABLED
 void Plane::afs_fs_check(void)
 {
-    // perform AFS failsafe checks
-#if AP_FENCE_ENABLED
-    const bool fence_breached = fence.get_breaches() != 0;
-#else
-    const bool fence_breached = false;
-#endif
-    afs.check(fence_breached, failsafe.AFS_last_valid_rc_ms);
+    afs.check(failsafe.AFS_last_valid_rc_ms);
 }
 #endif
 
@@ -542,6 +536,13 @@ void Plane::update_alt()
 
     update_flight_stage();
 
+#if AP_SCRIPTING_ENABLED
+    if (nav_scripting_active()) {
+        // don't call TECS while we are in a trick
+        return;
+    }
+#endif
+
     if (control_mode->does_auto_throttle() && !throttle_suppressed) {
 
         float distance_beyond_land_wp = 0;
@@ -549,16 +550,16 @@ void Plane::update_alt()
             distance_beyond_land_wp = current_loc.get_distance(next_WP_loc);
         }
 
-        float target_alt = relative_target_altitude_cm();
+        tecs_target_alt_cm = relative_target_altitude_cm();
 
         if (control_mode == &mode_rtl && !rtl.done_climb && (g2.rtl_climb_min > 0 || (plane.g2.flight_options & FlightOptions::CLIMB_BEFORE_TURN))) {
             // ensure we do the initial climb in RTL. We add an extra
             // 10m in the demanded height to push TECS to climb
             // quickly
-            target_alt = MAX(target_alt, prev_WP_loc.alt - home.alt) + (g2.rtl_climb_min+10)*100;
+            tecs_target_alt_cm = MAX(tecs_target_alt_cm, prev_WP_loc.alt - home.alt) + (g2.rtl_climb_min+10)*100;
         }
 
-        TECS_controller.update_pitch_throttle(target_alt,
+        TECS_controller.update_pitch_throttle(tecs_target_alt_cm,
                                                  target_airspeed_cm,
                                                  flight_stage,
                                                  distance_beyond_land_wp,

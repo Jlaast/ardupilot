@@ -23,13 +23,14 @@
 #include <AP_OpenDroneID/AP_OpenDroneID.h>
 #include <AP_Mount/AP_Mount.h>
 #include <AC_Fence/AC_Fence.h>
+#include <AP_Airspeed/AP_Airspeed_config.h>
 
 #include "ap_message.h"
 
 #define GCS_DEBUG_SEND_MESSAGE_TIMINGS 0
 
 #ifndef HAL_HIGH_LATENCY2_ENABLED
-#define HAL_HIGH_LATENCY2_ENABLED !HAL_MINIMIZE_FEATURES
+#define HAL_HIGH_LATENCY2_ENABLED 1
 #endif
 
 #ifndef HAL_MAVLINK_INTERVALS_FROM_FILES_ENABLED
@@ -289,7 +290,9 @@ public:
     void send_simstate() const;
     void send_sim_state() const;
     void send_ahrs();
+#if AP_MAVLINK_BATTERY2_ENABLED
     void send_battery2();
+#endif
 #if AP_OPTICALFLOW_ENABLED
     void send_opticalflow();
 #endif
@@ -749,7 +752,6 @@ private:
     // if true is returned, interval will contain the default interval for id
     bool get_default_interval_for_ap_message(const ap_message id, uint16_t &interval) const;
     //  if true is returned, interval will contain the default interval for id
-    bool get_default_interval_for_mavlink_message_id(const uint32_t mavlink_message_id, uint16_t &interval) const;
     // returns an interval in milliseconds for any ap_message in stream id
     uint16_t get_interval_for_stream(GCS_MAVLINK::streams id) const;
     // set an inverval for a specific mavlink message.  Returns false

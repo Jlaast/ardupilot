@@ -398,6 +398,10 @@ private:
         bool locked_pitch;
         float locked_roll_err;
         int32_t locked_pitch_cd;
+        Quaternion q;
+        bool roll_active_last;
+        bool pitch_active_last;
+        bool yaw_active_last;
     } acro_state;
 
     struct {
@@ -518,9 +522,7 @@ private:
         float throttle_pct;
         uint32_t start_ms;
         uint32_t current_ms;
-        bool done;
     } nav_scripting;
-    
 #endif
 
     struct {
@@ -833,7 +835,7 @@ private:
     void set_target_altitude_proportion(const Location &loc, float proportion);
     void constrain_target_altitude_location(const Location &loc1, const Location &loc2);
     int32_t calc_altitude_error_cm(void);
-    void check_fbwb_minimum_altitude(void);
+    void check_fbwb_altitude(void);
     void reset_offset_altitude(void);
     void set_offset_altitude_location(const Location &start_loc, const Location &destination_loc);
     bool above_location_current(const Location &loc);
@@ -862,6 +864,7 @@ private:
     void stabilize_yaw(float speed_scaler);
     void stabilize_training(float speed_scaler);
     void stabilize_acro(float speed_scaler);
+    void stabilize_acro_quaternion(float speed_scaler);
     void calc_nav_yaw_coordinated(float speed_scaler);
     void calc_nav_yaw_course(void);
     void calc_nav_yaw_ground(void);
@@ -1127,8 +1130,8 @@ private:
 
 #if AP_SCRIPTING_ENABLED
     // support for NAV_SCRIPT_TIME mission command
-    bool nav_scripting_active(void) const;
-    bool nav_script_time(uint16_t &id, uint8_t &cmd, float &arg1, float &arg2) override;
+    bool nav_scripting_active(void);
+    bool nav_script_time(uint16_t &id, uint8_t &cmd, float &arg1, float &arg2, int16_t &arg3, int16_t &arg4) override;
     void nav_script_time_done(uint16_t id) override;
 
     // command throttle percentage and roll, pitch, yaw target
@@ -1203,6 +1206,9 @@ private:
 
     // mode reason for entering previous mode
     ModeReason previous_mode_reason = ModeReason::UNKNOWN;
+
+    // last target alt we passed to tecs
+    int32_t tecs_target_alt_cm;
 
 public:
     void failsafe_check(void);
