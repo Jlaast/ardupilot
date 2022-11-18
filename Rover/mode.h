@@ -257,7 +257,6 @@ public:
 };
 
 
-
 class ModeAuto : public Mode
 {
 public:
