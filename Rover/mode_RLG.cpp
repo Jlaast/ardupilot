@@ -1,8 +1,46 @@
 #include "Rover.h"
 
+#if HAL_OS_POSIX_IO
+#include <stdio.h>
+#endif
+
+void setup();
+void loop();
+
+
+/* setup UART at 115200 ---------------------------------------- */
+static void setup_uart(AP_HAL::UARTDriver *uart, const char *name)
+{
+    if (uart == NULL)
+    {
+        // that UART doesn't exist on this platform
+        return;
+    }
+    ///begin(baudrate,Rx,Tx)
+    uart->begin(115200);
+}
+
+void setup(void)
+{
+/* Setup UartC ------------- */
+   hal.scheduler->delay(1000); //Ensure that the uartA can be initialized
+   setup_uart(hal.serial(1), "SERIAL1");
+}
+   char c = 0;
+   static char buf[16];
+   static unsigned int i;
+
 void ModeRLG::update()
 {
-    gcs().send_text(MAV_SEVERITY_CRITICAL,"ModeRLG Hello Purple Team ! %5.3f",(double)3.142f);
+
+    while(hal.serial(1)->available() > 0 && c != '\n' && i < sizeof(buf)){
+      c = hal.serial(1)->read();
+      buf[i++] = c;
+      //printf("Hello on UART %s at %.3f seconds\n",name, (double)(AP_HAL::millis() * 0.001f));
+      gcs().send_text(MAV_SEVERITY_CRITICAL, "UART1 %c ",  c);
+   }
+
+
     // get speed forward
     float speed, desired_steering;
     if (!attitude_control.get_forward_speed(speed)) {
@@ -61,5 +99,5 @@ bool ModeRLG::requires_velocity() const
 // sailboats in acro mode support user manually initiating tacking from transmitter
 void ModeRLG::handle_tack_request()
 {
-    rover.g2.sailboat.handle_tack_request_acro();
+    //rover.g2.sailboat.handle_tack_request_acro();
 }
