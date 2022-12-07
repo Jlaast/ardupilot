@@ -1897,7 +1897,7 @@ class AutoTest(ABC):
             0,  # p7
         )
 
-    def reboot_sitl_mav(self, required_bootcount=None):
+    def reboot_sitl_mav(self, required_bootcount=None, force=False):
         """Reboot SITL instance using mavlink and wait for it to reconnect."""
         # we must make sure that stats have been reset - otherwise
         # when we reboot we'll reset statistics again and lose our
@@ -1929,6 +1929,9 @@ class AutoTest(ABC):
             # receiving an ACK from the process turns out to be really
             # quite difficult.  So just send it and hope for the best.
             self.progress("Sending reboot command")
+            p6 = 0
+            if force:
+                p6 = 20190226  # magic force-reboot value
             self.send_cmd(
                 mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
                 1,
@@ -1936,7 +1939,7 @@ class AutoTest(ABC):
                 0,
                 0,
                 0,
-                0,
+                p6,
                 0)
             do_context = True
         if do_context:
@@ -1971,12 +1974,12 @@ class AutoTest(ABC):
                                        0,
                                        0)
 
-    def reboot_sitl(self, required_bootcount=None):
+    def reboot_sitl(self, required_bootcount=None, force=False):
         """Reboot SITL instance and wait for it to reconnect."""
-        if self.armed():
+        if self.armed() and not force:
             raise NotAchievedException("Reboot attempted while armed")
         self.progress("Rebooting SITL")
-        self.reboot_sitl_mav(required_bootcount=required_bootcount)
+        self.reboot_sitl_mav(required_bootcount=required_bootcount, force=force)
         self.do_heartbeats(force=True)
         self.assert_simstate_location_is_at_startup_location()
 
@@ -3848,7 +3851,7 @@ class AutoTest(ABC):
                 raise ValueError("count %u not handled" % count)
         self.progress("Files same")
 
-    def assert_not_receive_message(self, message, timeout=1, mav=None):
+    def assert_not_receive_message(self, message, timeout=1, mav=None, condition=None):
         '''this is like assert_not_receiving_message but uses sim time not
         wallclock time'''
         self.progress("making sure we're not getting %s messages" % message)
@@ -3857,7 +3860,7 @@ class AutoTest(ABC):
 
         tstart = self.get_sim_time_cached()
         while True:
-            m = mav.recv_match(type=message, blocking=True, timeout=0.1)
+            m = mav.recv_match(type=message, blocking=True, timeout=0.1, condition=condition)
             if m is not None:
                 self.progress("Received: %s" % self.dump_message_verbose(m))
                 raise PreconditionFailedException("Receiving %s messages" % message)
@@ -7073,8 +7076,12 @@ Also, ignores heartbeats not from our target system'''
     def installed_script_path(self, scriptname):
         return os.path.join("scripts", os.path.basename(scriptname))
 
-    def install_script(self, source, scriptname):
-        dest = self.installed_script_path(scriptname)
+    def install_script(self, source, scriptname, install_name=None):
+        if install_name is not None:
+            dest = self.installed_script_path(install_name)
+        else:
+            dest = self.installed_script_path(scriptname)
+
         destdir = os.path.dirname(dest)
         if not os.path.exists(destdir):
             os.mkdir(destdir)
@@ -7089,9 +7096,9 @@ Also, ignores heartbeats not from our target system'''
         source = self.script_test_source_path(scriptname)
         self.install_script(source, scriptname)
 
-    def install_applet_script(self, scriptname):
+    def install_applet_script(self, scriptname, install_name=None):
         source = self.script_applet_source_path(scriptname)
-        self.install_script(source, scriptname)
+        self.install_script(source, scriptname, install_name=install_name)
 
     def remove_example_script(self, scriptname):
         dest = self.installed_script_path(os.path.basename(scriptname))
@@ -9371,7 +9378,9 @@ Also, ignores heartbeats not from our target system'''
         if ex is not None:
             raise ex
 
-    def send_poll_message(self, message_id, target_sysid=None, target_compid=None, quiet=False):
+    def send_poll_message(self, message_id, target_sysid=None, target_compid=None, quiet=False, mav=None):
+        if mav is None:
+            mav = self.mav
         if type(message_id) == str:
             message_id = eval("mavutil.mavlink.MAVLINK_MSG_ID_%s" % message_id)
         self.send_cmd(mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE,
@@ -9384,24 +9393,30 @@ Also, ignores heartbeats not from our target system'''
                       0,
                       target_sysid=target_sysid,
                       target_compid=target_compid,
-                      quiet=quiet)
+                      quiet=quiet,
+                      mav=mav)
 
-    def poll_message(self, message_id, timeout=10, quiet=False):
+    def poll_message(self, message_id, timeout=10, quiet=False, mav=None):
+        if mav is None:
+            mav = self.mav
         if type(message_id) == str:
             message_id = eval("mavutil.mavlink.MAVLINK_MSG_ID_%s" % message_id)
         tstart = self.get_sim_time() # required for timeout in run_cmd_get_ack to work
-        self.send_poll_message(message_id, quiet=quiet)
+        self.send_poll_message(message_id, quiet=quiet, mav=mav)
         self.run_cmd_get_ack(
             mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE,
             mavutil.mavlink.MAV_RESULT_ACCEPTED,
             timeout,
             quiet=quiet,
+            mav=mav
         )
         while True:
             if self.get_sim_time_cached() - tstart > timeout:
                 raise NotAchievedException("Did not receive polled message")
-            m = self.mav.recv_match(blocking=True,
-                                    timeout=0.1)
+            m = mav.recv_match(blocking=True,
+                               timeout=0.1)
+            if self.mav != mav:
+                self.drain_mav()
             if m is None:
                 continue
             if m.id != message_id:
@@ -11881,7 +11896,7 @@ switch value'''
             raise NotAchievedException("Did not get BATTERY_STATUS message")
         battery_status_current_a = batt.current_battery * 0.01 # cA -> A
         self.progress("BATTERY_STATUS current==%f frsky==%f" % (battery_status_current_a, current_a))
-        if self.compare_number_percent(battery_status_current_a, current_a, 10):
+        if self.compare_number_percent(round(battery_status_current_a * 10), round(current_a * 10), 10):
             return True
         return False
 

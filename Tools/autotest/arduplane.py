@@ -2426,7 +2426,7 @@ class AutoTestPlane(AutoTest):
         self.wait_altitude(alt_min-10, alt_min, timeout=600, relative=True)
 
         self.progress("Waiting for throttle up")
-        self.wait_servo_channel_value(3, 1200, timeout=2, comparator=operator.gt)
+        self.wait_servo_channel_value(3, 1200, timeout=5, comparator=operator.gt)
 
         self.progress("Waiting for climb to cutoff altitude")
         alt_ctf = self.get_parameter('SOAR_ALT_CUTOFF')
@@ -3961,7 +3961,8 @@ class AutoTestPlane(AutoTest):
     def AerobaticsScripting(self):
         '''Fixed Wing Aerobatics'''
         applet_script = "Aerobatics/FixedWing/plane_aerobatics.lua"
-        trick72 = "Aerobatics/FixedWing/trick72.txt"
+        airshow = "Aerobatics/FixedWing/Schedules/AirShow.txt"
+        trick72 = "trick72.txt"
 
         model = "plane-3d"
 
@@ -3973,7 +3974,7 @@ class AutoTestPlane(AutoTest):
 
         self.context_push()
         self.install_applet_script(applet_script)
-        self.install_applet_script(trick72)
+        self.install_applet_script(airshow, install_name=trick72)
         self.context_collect('STATUSTEXT')
         self.reboot_sitl()
 
@@ -4028,7 +4029,7 @@ class AutoTestPlane(AutoTest):
         # check all messages to see if we got all tricks
         tricks = ["Loop", "HalfReverseCubanEight", "ScaleFigureEight", "Immelmann",
                   "Split-S", "RollingCircle", "HumptyBump", "HalfCubanEight",
-                  "BarrelRoll", "HalfReverseCubanEight",
+                  "BarrelRoll", "CrossBoxTopHat", "TriangularLoop",
                   "Finishing SuperAirShow!"]
         texts = [m.text for m in messages]
         for t in tricks:
@@ -4036,6 +4037,46 @@ class AutoTestPlane(AutoTest):
                 self.progress("Completed trick %s" % t)
             else:
                 raise NotAchievedException("Missing trick %s" % t)
+
+    def MANUAL_CONTROL(self):
+        '''test MANUAL_CONTROL mavlink message'''
+        self.set_parameter("SYSID_MYGCS", self.mav.source_system)
+
+        self.progress("Takeoff")
+        self.takeoff(alt=50)
+
+        self.change_mode('FBWA')
+
+        tstart = self.get_sim_time_cached()
+        roll_input = -500
+        want_roll_degrees = -12
+        while True:
+            if self.get_sim_time_cached() - tstart > 10:
+                raise AutoTestTimeoutException("Did not reach roll")
+            self.progress("Sending roll-left")
+            self.mav.mav.manual_control_send(
+                1, # target system
+                32767, # x (pitch)
+                roll_input, # y (roll)
+                32767, # z (thrust)
+                32767, # r (yaw)
+                0) # button mask
+            m = self.mav.recv_match(type='ATTITUDE', blocking=True, timeout=1)
+            print("m=%s" % str(m))
+            if m is None:
+                continue
+            p = math.degrees(m.roll)
+            self.progress("roll=%f want<=%f" % (p, want_roll_degrees))
+            if p <= want_roll_degrees:
+                break
+        self.mav.mav.manual_control_send(
+            1, # target system
+            32767, # x (pitch)
+            32767, # y (roll)
+            32767, # z (thrust)
+            32767, # r (yaw)
+            0) # button mask
+        self.fly_home_land_and_disarm()
 
     def tests(self):
         '''return list of all tests'''
@@ -4115,6 +4156,7 @@ class AutoTestPlane(AutoTest):
             self.MidAirDisarmDisallowed,
             self.EmbeddedParamParser,
             self.AerobaticsScripting,
+            self.MANUAL_CONTROL,
         ])
         return ret
 

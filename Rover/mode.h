@@ -27,7 +27,9 @@ public:
         SMART_RTL    = 12,
         GUIDED       = 15,
         INITIALISING = 16,
-        RLG          = 17,
+        FOLLOWX      = 17,
+        FOLLOWY      = 18,
+        
     };
 
     // Constructor
@@ -712,12 +714,47 @@ protected:
     bool _enter() override { return false; };
 };
 
-class ModeFollow : public Mode
+class ModeFollowx : public Mode
 {
 public:
 
-    uint32_t mode_number() const override { return FOLLOW; }
-    const char *name4() const override { return "FOLL"; }
+    uint32_t mode_number() const override { return FOLLOWX; }
+    const char *name4() const override { return "FOLLX"; }
+
+    // methods that affect movement of the vehicle in this mode
+    void update() override;
+
+    // attributes of the mode
+    bool is_autopilot_mode() const override { return true; }
+
+    // return desired heading (in degrees) and cross track error (in meters) for reporting to ground station (NAV_CONTROLLER_OUTPUT message)
+    float wp_bearing() const override;
+    float nav_bearing() const override { return wp_bearing(); }
+    float crosstrack_error() const override { return 0.0f; }
+
+    // return desired location
+    bool get_desired_location(Location& destination) const override WARN_IF_UNUSED { return false; }
+
+    // return distance (in meters) to destination
+    float get_distance_to_destination() const override;
+
+    // set desired speed in m/s
+    bool set_desired_speed(float speed) override;
+
+protected:
+
+    bool _enter() override;
+    void _exit() override;
+
+    float _desired_speed;       // desired speed in m/s
+};
+
+class ModeFollowy : public Mode
+{
+public:
+
+    uint32_t mode_number() const override { return FOLLOWY; }
+    const char *name4() const override { return "FOLLY"; }
 
     // methods that affect movement of the vehicle in this mode
     void update() override;

@@ -22,7 +22,6 @@ AEROM_KE_ANG = bind_add_param('KE_ANG', 3, 0)
 THR_PIT_FF = bind_add_param('THR_PIT_FF', 4, 80)
 SPD_P = bind_add_param('SPD_P', 5, 5)
 SPD_I = bind_add_param('SPD_I', 6, 25)
-ERR_CORR_TC = bind_add_param('ERR_COR_TC', 7, 3)
 ROLL_CORR_TC = bind_add_param('ROL_COR_TC', 8, 0.25)
 -- removed 9 and 10
 TIME_CORR_P = bind_add_param('TIME_COR_P', 11, 1.0)
@@ -35,6 +34,10 @@ AEROM_THR_MIN = bind_add_param('THR_MIN', 17, 0)
 AEROM_THR_BOOST = bind_add_param('THR_BOOST', 18, 50)
 AEROM_YAW_ACCEL = bind_add_param('YAW_ACCEL', 19, 1500)
 AEROM_LKAHD = bind_add_param('LKAHD', 20, 0.5)
+AEROM_PATH_SCALE = bind_add_param('PATH_SCALE', 21, 1.0)
+AEROM_BOX_WIDTH = bind_add_param('BOX_WIDTH', 22, 400)
+AEROM_STALL_THR = bind_add_param('STALL_THR', 23, 40)
+AEROM_STALL_PIT = bind_add_param('STALL_PIT', 24, -20)
 
 -- cope with old param values
 if AEROM_ANG_ACCEL:get() < 100 and AEROM_ANG_ACCEL:get() > 0 then
@@ -45,10 +48,16 @@ if AEROM_ANG_TC:get() > 1.0 then
 end
 
 ACRO_ROLL_RATE = Parameter("ACRO_ROLL_RATE")
+ACRO_YAW_RATE = Parameter('ACRO_YAW_RATE')
 ARSPD_FBW_MIN = Parameter("ARSPD_FBW_MIN")
 SCALING_SPEED = Parameter("SCALING_SPEED")
 
-local GRAVITY_MSS = 9.80665
+GRAVITY_MSS = 9.80665
+
+--[[
+   list of attributes that can be added to a path element
+--]]
+local path_attribs = { "roll_ref", "set_orient", "rate_override", "thr_boost", "pos_corr", "message", "shift_xy" }
 
 --[[
    Aerobatic tricks on a switch support - allows for tricks to be initiated outside AUTO mode
@@ -69,6 +78,15 @@ local TRICKS = nil
 local TRIK_SEL_FN = nil
 local TRIK_ACT_FN = nil
 local TRIK_COUNT  = nil
+
+--[[
+   find our rudder channel for stall turns
+--]]
+local K_RUDDER = 21
+local rudder_chan = SRV_Channels:find_channel(K_RUDDER)
+local RUDD_REVERSED = Parameter(string.format("SERVO%u_REVERSED", rudder_chan+1))
+local RUDD_MIN = Parameter(string.format("SERVO%u_MIN", rudder_chan+1))
+local RUDD_MAX = Parameter(string.format("SERVO%u_MAX", rudder_chan+1))
 
 local function TrickDef(id, arg1, arg2, arg3, arg4)
    local self = {}
@@ -118,7 +136,7 @@ local NAV_SCRIPT_TIME = 42702
 
 local MODE_AUTO = 10
 
-local LOOP_RATE = 20
+local LOOP_RATE = 40
 local DO_JUMP = 177
 local k_throttle = 70
 local NAME_FLOAT_RATE = 2
@@ -168,6 +186,19 @@ function calc_lowpass_alpha(dt, time_constant)
    return dt/(dt+rc)
 end
 
+--[[ get the c.y element of the DCM body to earth matrix, which gives
+   the projection of the vehicle y axis in the down direction
+--]]
+function get_ahrs_dcm_c_y()
+   local ahrs_quat = ahrs:get_quaternion()
+   local q1 = ahrs_quat:q1()
+   local q2 = ahrs_quat:q2()
+   local q3 = ahrs_quat:q3()
+   local q4 = ahrs_quat:q4()
+   local q3q4 = q3 * q4
+   local q1q2 = q1 * q2
+   return 2*(q3q4 + q1q2)
+end
 
 -- a PI controller implemented as a Lua object
 local function PI_controller(kP,kI,iMax,min,max)
@@ -454,6 +485,57 @@ function roll_angle_exit(_angle)
 end
 
 --[[
+   implement a sequence of rolls, specified as a list of {proportion, roll_angle} pairs
+--]]
+function roll_sequence(_seq)
+   local self = {}
+   local seq = _seq
+   local total = 0.0
+   local end_t = {}
+   local start_t = {}
+   local start_ang = {}
+   local angle = 0.0
+   for i = 1, #seq do
+      total = total + seq[i][1]
+   end
+   local t = 0.0
+   for i = 1, #seq do
+      start_t[i] = t
+      start_ang[i] = angle
+      angle = angle + seq[i][2]
+      t = t + seq[i][1]/total
+      end_t[i] = t
+   end
+   function self.get_roll(t)
+      for i = 1, #seq do
+         if t <= end_t[i] then
+            local t2 = (t - start_t[i])/(seq[i][1]/total)
+            return start_ang[i] + t2 * seq[i][2]
+         end
+      end
+      -- we've gone past the end
+      return start_ang[#seq] + seq[#seq][2]
+   end
+   return self
+end
+
+--[[ given a path function get_pos() calculate the extents of the path
+   along the X axis as a tuple
+--]]
+function get_extents_x(get_pos)
+   local p = get_pos(0)
+   local min_x = p:x()
+   local max_x = min_x
+   for t=0, 1, 0.02 do
+      p = get_pos(t)
+      min_x = math.min(min_x, p:x())
+      max_x = math.max(max_x, p:x())
+   end
+   return { min_x, max_x }
+end
+
+
+--[[
   all path components inherit from PathComponent
 --]]
 function PathComponent()
@@ -471,10 +553,33 @@ function PathComponent()
    function self.get_roll_correction(t)
       return 0
    end
-   function self.get_throttle_boost(t)
-      return self.thr_boost or false
+
+   function self.get_attribute(t, attrib)
+      return self[attrib]
    end
+
+   --[[ get the extents of the path on x axis. Can be overridden by a
+      more efficient and accurate path specific function
+   --]]
+   local extents = nil
+   function self.get_extents_x()
+      if extents ~= nil then
+         return extents
+      end
+      extents = get_extents_x(self.get_pos)
+      return extents
+   end
+
    return self
+end
+
+--[[
+   return a quaternion for a roll, pitch, yaw (321 euler sequence) attitude
+--]]
+function qorient(roll_deg, pitch_deg, yaw_deg)
+   local q = Quaternion()
+   q:from_euler(math.rad(roll_deg), math.rad(pitch_deg), math.rad(yaw_deg))
+   return q
 end
 
 --[[
@@ -514,6 +619,86 @@ function path_straight(_distance)
    end
    function self.get_length()
       return distance
+   end
+   return self
+end
+
+--[[
+   path component that does a straight line then reverses direction
+--]]
+function path_reverse(_distance)
+   local self = PathComponent()
+   self.name = "path_straight"
+   local distance = _distance
+   function self.get_pos(t)
+      if t < 0.5 then
+         return makeVector3f(distance*t*2, 0, 0)
+      else
+         return makeVector3f(distance-(distance*(t-0.5)*2), 0, 0)
+      end
+   end
+   function self.get_length()
+      return distance*2
+   end
+   return self
+end
+
+--[[
+   path component that aligns to within the aerobatic box
+--]]
+function path_align_box(_alignment)
+   local self = PathComponent()
+   self.name = "path_align_box"
+   local distance = nil
+   local alignment = _alignment
+   function self.get_pos(t)
+      return makeVector3f(distance*t, 0, 0)
+   end
+   function self.get_length()
+      return distance
+   end
+   function self.set_next_extents(extents, start_pos, start_orientation)
+      local box_half = AEROM_BOX_WIDTH:get()/2
+      local start_x = start_pos:x()
+      local next_max_x = extents[2]
+      if math.abs(math.deg(start_orientation:get_euler_yaw())) > 90 then
+         -- we are on a reverse path
+         distance = (box_half * alignment) + start_x - next_max_x
+      else
+         -- we are on a forward path
+         distance = (box_half * alignment) - start_x - next_max_x
+      end
+      distance = math.max(distance, 0.01)
+   end
+   return self
+end
+
+--[[
+   path component that aligns so the center of the next maneuver is
+   centered within the aerobatic box
+--]]
+function path_align_center()
+   local self = PathComponent()
+   self.name = "path_align_center"
+   local distance = nil
+   local alignment = _alignment
+   function self.get_pos(t)
+      return makeVector3f(distance*t, 0, 0)
+   end
+   function self.get_length()
+      return distance
+   end
+   function self.set_next_extents(extents, start_pos, start_orientation)
+      local start_x = start_pos:x()
+      local next_mid_x = (extents[1]+extents[2])*0.5
+      if math.abs(math.deg(start_orientation:get_euler_yaw())) > 90 then
+         -- we are on a reverse path
+         distance = start_x - next_mid_x
+      else
+         -- we are on a forward path
+         distance = - start_x - next_mid_x
+      end
+      distance = math.max(distance, 0.01)
    end
    return self
 end
@@ -653,17 +838,18 @@ function Path(_path_component, _roll_component)
    function self.get_pos(t)
       return path_component.get_pos(t)
    end
-   function self.get_speed(t)
-      return nil
-   end
    function self.get_length()
       return path_component.get_length()
    end
    function self.get_final_orientation()
       return path_component.get_final_orientation()
    end
-   function self.get_throttle_boost(t)
-      return self.thr_boost or false
+   function self.get_attribute(t, attrib)
+      return self[attrib]
+   end
+
+   function self.set_next_extents(extents, start_pos, start_orientation)
+      path_component.set_next_extents(extents, start_pos, start_orientation)
    end
    return self
 end
@@ -684,8 +870,6 @@ function path_composer(_name, _subpaths)
    local start_pos = {}
    local start_angle = {}
    local start_roll_correction = {}
-   local end_speed = {}
-   local start_speed = {}
    local total_length = 0
    local num_sub_paths = #subpaths
    local last_subpath_t = { -1, 0, 0 }
@@ -698,7 +882,6 @@ function path_composer(_name, _subpaths)
    local highest_i = 0
    local cache_i = -1
    local cache_sp = nil
-   local message = nil
 
    -- return the subpath with index i. Used to cope with two ways of calling path_composer
    function self.subpath(i)
@@ -710,12 +893,14 @@ function path_composer(_name, _subpaths)
       if sp.name then
          -- we are being called with a list of Path objects
          cache_sp = sp
-         message = nil
       else
          -- we are being called with a list function/argument tuples
          local args = subpaths[i][2]
          cache_sp = subpaths[i][1](args[1], args[2], args[3], args[4], start_pos[i], start_orientation[i])
-         message = subpaths[i].message
+         -- copy over path attributes
+         for k, v in pairs(path_attribs) do
+            cache_sp[v] = subpaths[i][v]
+         end
       end
       return cache_sp
    end
@@ -728,7 +913,19 @@ function path_composer(_name, _subpaths)
       start_roll_correction[i] = roll_correction
 
       local sp = self.subpath(i)
+
       lengths[i] = sp.get_length()
+      if lengths[i] == nil and i < num_sub_paths then
+         local sp2 = self.subpath(i+1)
+         local next_extents = sp2.get_extents_x()
+         if next_extents ~= nil then
+            sp.set_next_extents(next_extents, start_pos[i], start_orientation[i])
+            lengths[i] = sp.get_length()
+            -- solidify this subpath now that it has its length calculated
+            subpaths[i] = sp
+         end
+      end
+
       total_length = total_length + lengths[i]
 
       local spos = quat_earth_to_body(orientation, sp.get_pos(1.0))
@@ -740,12 +937,10 @@ function path_composer(_name, _subpaths)
       angle = angle + sp.get_roll(1.0, lengths[i]/speed)
       roll_correction = roll_correction + sp.get_roll_correction(1.0)
 
-      start_speed[i] = speed
-      end_speed[i] = sp.get_speed(1.0)
-      if end_speed[i] == nil then
-         end_speed[i] = target_groundspeed()
+      if sp.set_orient ~= nil then
+         -- override orientation at this point in the sequence
+         orientation = sp.set_orient
       end
-      speed = end_speed[i]
 
       if sp.roll_ref ~= nil then
          local q = Quaternion()
@@ -784,8 +979,8 @@ function path_composer(_name, _subpaths)
       local sp = self.subpath(i)
       if i > highest_i and t < 1.0 and t > 0 then
          highest_i = i
-         if message ~= nil then
-            gcs:send_text(0, message)
+         if sp.message ~= nil then
+            gcs:send_text(0, sp.message)
          end
          if AEROM_DEBUG:get() > 0 then
             gcs:send_text(0, string.format("starting %s[%d] %s", self.name, i, sp.name))
@@ -804,10 +999,7 @@ function path_composer(_name, _subpaths)
    -- return angle for the composed path at time t
    function self.get_roll(t, time_s)
       local subpath_t, i = self.get_subpath_t(t)
-      local speed = self.get_speed(t)
-      if speed == nil then
-         speed = target_groundspeed()
-      end
+      local speed = target_groundspeed()
       local sp = self.subpath(i)
       angle = sp.get_roll(subpath_t, lengths[i]/speed)
       return angle + start_angle[i]
@@ -819,12 +1011,6 @@ function path_composer(_name, _subpaths)
       return sp.get_roll_correction(subpath_t) + start_roll_correction[i]
    end
    
-   -- return speed for the composed path at time t
-   function self.get_speed(t)
-      local subpath_t, i = self.get_subpath_t(t)
-      return start_speed[i] + subpath_t * (end_speed[i] - start_speed[i])
-   end
-
    function self.get_length()
       return total_length
    end
@@ -833,12 +1019,33 @@ function path_composer(_name, _subpaths)
       return final_orientation
    end
 
-   function self.get_throttle_boost(t)
+   function self.get_attribute(t, attrib)
       local subpath_t, i = self.get_subpath_t(t)
       local sp = self.subpath(i)
-      return sp.get_throttle_boost(t)
+      return sp[attrib] or sp.get_attribute(subpath_t, attrib)
    end
 
+   local extents = nil
+   function self.get_extents_x()
+      if extents ~= nil then
+         return extents
+      end
+      extents = get_extents_x(self.get_pos)
+      return extents
+   end
+
+   --[[
+      get the time that the next segment starts
+   --]]
+   function self.get_next_segment_start(t)
+      local subpath_t, i = self.get_subpath_t(t)
+      local sp = self.subpath(i)
+      if sp.get_next_segment_start ~= nil then
+         return start_time[i] + (sp.get_next_segment_start(subpath_t) * (end_time[i] - start_time[i]))
+      end
+      return end_time[i]
+   end
+   
    return self
 end
 
@@ -854,10 +1061,10 @@ function make_paths(name, paths)
       else
          p[i] = Path(paths[i][1], paths[i][2])
       end
-      if paths[i].roll_ref then
-         p[i].roll_ref = paths[i].roll_ref
+      -- copy over path attributes
+      for k, v in pairs(path_attribs) do
+         p[i][v] = paths[i][v]
       end
-      p[i].thr_boost = paths[i].thr_boost
    end
    return path_composer(name, p)
 end
@@ -900,7 +1107,6 @@ function straight_roll(length, num_rolls, arg3, arg4)
 end
 
 --[[
-
    fly straight until we are distance meters from the composite path
    origin in the maneuver frame along the X axis. If we are already
    past that position then return immediately
@@ -912,6 +1118,22 @@ function straight_align(distance, arg2, arg3, arg4, start_pos, start_orientation
    return make_paths("straight_align", {
          { path_straight(len), roll_angle(0) },
    })
+end
+
+--[[
+   fly straight so that the next maneuver in the sequence ends at
+   the given proportion of the aerobatic box
+--]]
+function align_box(alignment, arg2, arg3, arg4)
+   return Path(path_align_box(alignment), roll_angle(0))
+end
+
+--[[
+   fly straight so that the next maneuver in the sequence is centered
+   in the aerobatic box
+--]]
+function align_center(arg1, arg2, arg3, arg4)
+   return Path(path_align_center(), roll_angle(0))
 end
 
 function immelmann_turn(r, arg2, arg3, arg4)
@@ -945,22 +1167,6 @@ function humpty_bump(r, h, arg3, arg4)
             { path_straight(h-2*rabs),              roll_angle(0) },
             { path_vertical_arc(-r, 90),            roll_angle(0) },
             { path_straight(2*rabs),                roll_angle(0) },
-   })
-end
-
-function crossbox_humpty(r, h, arg3, arg4)
-   assert(h >= 2*r)
-   local rabs = math.abs(r)
-   return make_paths("crossbox_humpty", {
-            { path_vertical_arc(r, 90),          roll_angle(0) },
-            { path_straight((h-2*rabs)/3),       roll_angle(0) },
-            { path_straight((h-2*rabs)/3),       roll_angle(90),  roll_ref=90 },
-            { path_straight((h-2*rabs)/3),       roll_angle(0) },
-            { path_vertical_arc(-r, 180),        roll_angle(0) },
-            { path_straight((h-2*rabs)/3),       roll_angle(0) },
-            { path_straight((h-2*rabs)/3),       roll_angle(90), roll_ref=-90 },
-            { path_straight((h-2*rabs)/3),       roll_angle(0) },
-            { path_vertical_arc(r, 90),          roll_angle(0), roll_ref=180 },
    })
 end
 
@@ -1096,6 +1302,160 @@ end
 
 
 --[[
+   perform a rudder over maneuver
+--]]
+function rudder_over(_direction, _min_speed)
+   local self = {}
+   local direction = _direction
+   local min_speed = _min_speed
+   local reached_speed = false
+   local kick_started = false
+   local pitch2_done = false
+   local descent_done = false
+   local target_q = nil
+   local initial_q = nil
+   local last_t = nil
+   local initial_z = nil
+
+   --[[
+      the update() method is called during the rudder over, it
+      should return true when the maneuver is completed
+   --]]
+   function self.update(path, t, target_speed)
+      if descent_done then
+         -- we're all done
+         return true
+      end
+
+      local ahrs_quat = ahrs:get_quaternion()
+      local ahrs_pos = ahrs:get_relative_position_NED_origin()
+      local ahrs_gyro = ahrs:get_gyro()
+      local now = millis():tofloat() * 0.001
+      local pitch_threshold = 60.0
+
+      if target_q == nil then
+         -- initialising
+         initial_z = ahrs_pos:z()
+         target_q = quat_copy(ahrs_quat)
+         initial_q = quat_copy(target_q)
+         last_t = now
+      end
+
+      local dt = now - last_t
+      last_t = now
+
+      local error_quat = ahrs_quat:inverse() * target_q
+      local rate_rads = Vector3f()
+      error_quat:to_axis_angle(rate_rads)
+      local tc = ROLL_CORR_TC:get()
+      local rate_dps = rate_rads:scale(math.deg(1)/tc)
+
+      -- use user set throttle for achieving the stall
+      local throttle = AEROM_STALL_THR:get()
+      local pitch_deg = math.deg(ahrs:get_pitch())
+      if reached_speed and not kick_started and math.abs(math.deg(ahrs_gyro:z())) > ACRO_YAW_RATE:get()/3 then
+         kick_started = true
+      end
+      if kick_started then
+         -- when we have established some yaw rate cut the throttle to minimum
+         throttle = AEROM_THR_MIN:get()
+      end
+
+      vehicle:set_target_throttle_rate_rpy(throttle, rate_dps:x(), rate_dps:y(), rate_dps:z())
+
+      log_pose('POSM', ahrs_pos, ahrs:get_quaternion())
+      log_pose('POST', ahrs_pos, target_q)
+
+      local current_speed_up = -ahrs:get_velocity_NED():z()
+      if not reached_speed and current_speed_up <= min_speed then
+         reached_speed = true
+      end
+
+      if not reached_speed then
+         return false
+      end
+
+      -- integrate desired attitude through yaw
+      local q_rate_rads = makeVector3f(0,0,ahrs_gyro:z())
+      if pitch2_done then
+         -- stop adding yaw
+         q_rate_rads:z(0)
+      end
+      local rotation = Quaternion()
+      rotation:from_angular_velocity(q_rate_rads, dt)
+      target_q = target_q * rotation
+      target_q:normalize()
+
+      --[[
+         override rudder to maximum, basing PWM on the MIN/MAX of the channel
+         according to the desired direction
+      --]]
+      local rudd_pwm = nil
+      local desired_direction = direction
+      if desired_direction == 0 then
+         local c_y = get_ahrs_dcm_c_y()
+         if c_y > 0 then
+            desired_direction = 1
+         else
+            desired_direction = -1
+         end
+      end
+      if desired_direction * (RUDD_REVERSED:get()*2-1) < 0 then
+         rudd_pwm = RUDD_MAX:get()
+      else
+         rudd_pwm = RUDD_MIN:get()
+      end
+      if not pitch2_done then
+         SRV_Channels:set_output_pwm_chan_timeout(rudder_chan, rudd_pwm, math.floor(4*1000/LOOP_RATE))
+      end
+
+      if not kick_started then
+         return false
+      end
+
+      -- see if we are nose down
+      if kick_started and pitch_deg < AEROM_STALL_PIT:get() and not pitch2_done then
+         -- lock onto a descent path
+         pitch2_done = true
+         target_q = initial_q * qorient(0, 0, 180)
+         --[[ correct the attitude to the opposite correction that we
+            had at the start of the slowdown, so we fight the wind on
+            the way down
+         --]]
+         local error_q = initial_q:inverse() * qorient(0, 90, math.deg(initial_q:get_euler_yaw()))
+         local error_pitch = error_q:get_euler_pitch()
+         local error_yaw = error_q:get_euler_yaw()
+         target_q = target_q * qorient(0, math.deg(-2*error_pitch), math.deg(2*error_yaw))
+         target_q:normalize()
+         return false
+      end
+
+      if not pitch2_done or ahrs_pos:z() < initial_z then
+         -- haven't finished the descent
+         return false
+      end
+
+      -- all done, update state
+      descent_done = true
+      path_var.tangent = path_var.tangent:scale(-1)
+      path_var.path_t = path.get_next_segment_start(t)
+      path_var.accumulated_orientation_rel_ef = path_var.accumulated_orientation_rel_ef * qorient(0,0,180)
+      path_var.last_time = now
+      path_var.last_ang_rate_dps = ahrs_gyro:scale(math.deg(1))
+      path_var.pos = rotate_path(path, path_var.path_t, path_var.initial_ori, path_var.initial_ef_pos)
+      -- ensure that the path will move fwd on the next step
+      path_var.pos:z(path_var.pos:z()-10)
+
+      -- cancel rudder override
+      SRV_Channels:set_output_pwm_chan_timeout(rudder_chan, rudd_pwm, 0)
+
+      return false
+   end
+
+   return self
+end
+
+--[[
    stall turn is not really correct, as we don't fully stall. Needs to be
    reworked
 --]]
@@ -1104,10 +1464,10 @@ function stall_turn(radius, height, direction, min_speed)
    assert(h >= 0)
    return make_paths("stall_turn", {
          { path_vertical_arc(radius, 90),          roll_angle(0) },
-         { path_straight(h),                       roll_angle(0), min_speed },
-         { path_horizontal_arc(5*direction, 180),  roll_angle(0), min_speed },
          { path_straight(h),                       roll_angle(0) },
-         { path_vertical_arc(radius, 90),          roll_angle(0) },
+         { path_reverse(h/4),                      roll_angle(0), rate_override=rudder_over(direction,min_speed), set_orient=qorient(0,-90,0) },
+         { path_straight(h),                       roll_angle(0), pos_corr=0.5, shift_xy=true },
+         { path_vertical_arc(-radius, 90),         roll_angle(0), set_orient=qorient(0,0,180) },
    })
 end
 
@@ -1184,564 +1544,49 @@ function vertical_aerobatic_box(total_length, total_width, r, bank_angle)
    })
 end
 
-function multi_point_roll(length, N, arg3, arg4)
-   local paths = {}
-   local len_roll = length * (N-1) / (N*4-1)
-   local len_hold = length / (N*4-1)
-   local ang = 360 / N
-   for i = 1, N do
-      paths[#paths+1] = { path_straight(len_roll), roll_angle(ang) }
-      paths[#paths+1] = { path_straight(len_hold), roll_angle(0) }
+--[[
+   a multi-point roll
+     - length = total length of straight flight
+     - N = number of points of roll for full 360
+     - hold_frac = proportion of each segment to hold attitude, will use 0.2 if 0
+     - num_points = number of points of the N point roll to do, will use N if 0
+
+   Note that num_points can be greater than N, for example do 6 points
+   of a 4 point roll, resulting in inverted flight
+--]]
+function multi_point_roll(length, N, hold_frac, num_points)
+   if hold_frac <= 0 then
+      hold_frac = 0.2
    end
-   return make_paths("multi_point_roll", paths)
-end
-
-function two_point_roll(length, arg2, arg3, arg4)
-   return multi_point_roll(length, 2)
-end
-
-function four_point_roll(length, arg2, arg3, arg4)
-   return multi_point_roll(length, 4)
+   if num_points <= 0 then
+      num_points = N
+   end
+   --[[
+      construct a roll sequence to use over the full length
+   --]]
+   local seq = {}
+   local roll_frac = 1.0 - hold_frac
+   for i = 1, num_points do
+      seq[#seq+1] = { roll_frac, 360 / N }
+      if i < num_points then
+         seq[#seq+1] = { hold_frac, 0 }
+      end
+   end
+   return make_paths("multi_point_roll", {{ path_straight(length), roll_sequence(seq) }})
 end
 
 function eight_point_roll(length, arg2, arg3, arg4)
-   return multi_point_roll(length, 8)
+   return multi_point_roll(length, 8, 0.5)
 end
 
 function procedure_turn(radius, bank_angle, step_out, arg4)
    local rabs = math.abs(radius)
    return make_paths("procedure_turn", {
-            { path_straight(rabs),                  roll_angle(0) },
             { path_horizontal_arc(radius,  90),     roll_angle_entry_exit(bank_angle) },
             { path_straight(step_out),              roll_angle(0) },
             { path_horizontal_arc(-radius,  270),   roll_angle_entry_exit(-bank_angle) },
-            { path_straight(4*rabs),                roll_angle(0) },
+            { path_straight(3*rabs),                roll_angle(0) },
       })
-end
-
-function derry_turn(radius, bank_angle, arg3, arg4)
-   return make_paths("derry_turn", {
-            { path_horizontal_arc(radius,  90),     roll_angle_entry_exit(bank_angle) },
-            { path_horizontal_arc(-radius,  90),    roll_angle_entry_exit(-bank_angle) },
-      })
-end
-
-function p23_1(radius, height, width, arg4) -- top hat
-   return make_paths("p23_1", {
-            { path_vertical_arc(radius, 90),              roll_angle(0) },
-            { path_straight((height-2*radius)*2/9),       roll_angle(0) },
-            { path_straight((height-2*radius)*2/9),       roll_angle(90) },
-            { path_straight((height-2*radius)/9),         roll_angle(0) },
-            { path_straight((height-2*radius)*2/9),       roll_angle(90) },
-            { path_straight((height-2*radius)*2/9),       roll_angle(0) },            
-            { path_vertical_arc(-radius, 90),             roll_angle(0) },
-            { path_straight((width-2*radius)/3),          roll_angle(0) },
-            { path_straight((width-2*radius)/3),          roll_angle(180) },
-            { path_straight((width-2*radius)/3),          roll_angle(0) },
-            { path_vertical_arc(-radius, 90),             roll_angle(0) },
-            { path_straight((height-2*radius)*2/9),       roll_angle(0) },
-            { path_straight((height-2*radius)*2/9),       roll_angle(90) },
-            { path_straight((height-2*radius)/9),         roll_angle(0) },
-            { path_straight((height-2*radius)*2/9),       roll_angle(90) },
-            { path_straight((height-2*radius)*2/9),       roll_angle(0) },            
-            { path_vertical_arc(radius, 90),              roll_angle(0) },                        
-      })
-end
-
-function p23_2(radius, height, arg3, arg4)  -- half square
-   return make_paths("p23_2", {
-            { path_vertical_arc(-radius, 90),         roll_angle(0) },
-            { path_straight((height-2*radius)/3),     roll_angle(0) },
-            { path_straight((height-2*radius)/3),     roll_angle(180) },
-            { path_straight((height-2*radius)/3),     roll_angle(0) },
-            { path_vertical_arc(-radius, 90),         roll_angle(0) },                    
-      })
-end
-
-function p23_3(radius, height, arg3, arg4)   -- humpty
-   return make_paths("p23_3", {
-            { path_vertical_arc(radius, 90),          roll_angle(0) },
-            { path_straight((height-2*radius)/8),     roll_angle(0) },
-            { path_straight((height-2*radius)*6/8),   roll_angle(360) },
-            { path_straight((height-2*radius)/8),     roll_angle(0) },
-            { path_vertical_arc(radius, 180),         roll_angle(0) },    
-            { path_straight((height-2*radius)/3),     roll_angle(0) },
-            { path_straight((height-2*radius)/3),     roll_angle(180) },
-            { path_straight((height-2*radius)/3),     roll_angle(0) },
-            { path_vertical_arc(radius, 90),          roll_angle(0) },                                
-      })
-end
-
-function p23_4(radius, height, arg3, arg4)   -- on corner  
-   local l = ((height - (2 * radius)) * math.sin(math.rad(45)))                             
-   return make_paths("p23_4", {
-            { path_vertical_arc(-radius, 45),          roll_angle(0) },
-            { path_straight(l/3),                      roll_angle(0) },
-            { path_straight(l/3),                      roll_angle(180) },
-            { path_straight(l/3),                      roll_angle(0) },
-            { path_vertical_arc(-radius, 90),          roll_angle(0) },    
-            { path_straight(l/3),                      roll_angle(0) },
-            { path_straight(l/3),                      roll_angle(180) },
-            { path_straight(l/3),                      roll_angle(0) },
-            { path_vertical_arc(-radius, 45),          roll_angle(0) },                                
-      })
-end
-
-function p23_5(radius, height_gain, arg3, arg4)   -- 45 up - should be 1 1/2 snaps....
-    --local l = (height_gain - 2*radius*(1.0-math.cos(math.rad(45))))/math.sin(math.rad(45))
-   local l = (height_gain - (2 * radius) + (2 * radius * math.cos(math.rad(45)))) / math.cos(math.rad(45))
-   return make_paths("p23_5", {
-            { path_vertical_arc(-radius, 45),        roll_angle(0) },
-            { path_straight(l/3),                    roll_angle(0) },
-            { path_straight(l/3),                    roll_angle(540) },
-            { path_straight(l/3),                    roll_angle(0) },
-            { path_vertical_arc(radius, 45),         roll_angle(0) },            
-      })
-end
-
-function p23_6(radius, height_gain, arg3, arg4)   -- 3 sided
-   local l = (height_gain - 2*radius) / ((2*math.sin(math.rad(45))) + 1)
-   return make_paths("p23_6", {
-            { path_vertical_arc(-radius, 45),      roll_angle(0) },
-            { path_straight(l),                    roll_angle(0) },
-            { path_vertical_arc(-radius, 45),      roll_angle(0) },
-            { path_straight(l),                    roll_angle(0) },
-            { path_vertical_arc(-radius, 45),      roll_angle(0) },            
-            { path_straight(l),                    roll_angle(0) },
-            { path_vertical_arc(-radius, 45),      roll_angle(0) },            
-      })
-end
-
-function p23_7(length, arg2, arg3, arg4) -- roll combination
-   return make_paths("p23_7", {
-            { path_straight(length*5/22),       roll_angle(180) },
-            { path_straight(length*1/22),       roll_angle(0) },
-            { path_straight(length*5/22),       roll_angle(180) },
-            { path_straight(length*5/22),       roll_angle(-180) },
-            { path_straight(length*1/22),       roll_angle(0) },
-            { path_straight(length*5/22),       roll_angle(-180) },                 
-      })
-end
-
-function p23_8(radius, height, arg3, arg4)  -- immelmann
-   return make_paths("p23_8", {
-         { path_vertical_arc(-radius, 180),           roll_angle(0) },
-         { path_straight(radius/2),                   roll_angle(180) },                    
-      })
-end
-
-function p23_9(radius, height, num_turns, arg4)   -- spin (currently a vert down 1/2 roll)
-   return make_paths("p23_9", {
-            { path_vertical_arc(radius, 90),          roll_angle(0) },
-            { path_straight(height-2*radius),         roll_angle(180) },
-            { path_vertical_arc(-radius, 90),         roll_angle(0) },                             
-      })
-end
-
-function p23_10(radius, height, arg3, arg4)   -- humpty                              
-   return make_paths("p23_10", {
-            { path_vertical_arc(radius, 90),               roll_angle(0) },
-            { path_straight((height-2*radius)/3),          roll_angle(0) },
-            { path_straight((height-2*radius)/3),          roll_angle(180) },
-            { path_straight((height-2*radius)/3),          roll_angle(0) },
-            { path_vertical_arc(-radius, 180),             roll_angle(0) },
-            { path_straight((height-2*radius)/3),          roll_angle(0) },
-            { path_straight((height-2*radius)/3),          roll_angle(180) },
-            { path_straight((height-2*radius)/3),          roll_angle(0) },
-            { path_vertical_arc(-radius, 90),              roll_angle(0) },                             
-      })
-end
-
-function p23_11(radius, height, arg3, arg4)   -- laydown loop
-   local rabs = math.abs(radius)
-   local vert_length = height - (2 * rabs)               
-   local angle_length =  ((2 * rabs) - (2 * (rabs - (rabs * (math.cos(math.rad(45))))))) / math.sin(math.rad(45))                                     
-   return make_paths("p23_11", {
-            { path_vertical_arc(-radius, 45),            roll_angle(0) },
-            { path_straight(angle_length*2/6),           roll_angle(0) },
-            { path_straight(angle_length*1/6),           roll_angle(180) },
-            { path_straight(angle_length*1/6),           roll_angle(-180) },
-            { path_straight(angle_length*2/6),           roll_angle(0) },
-            { path_vertical_arc(radius, 315),            roll_angle(0) },         
-            { path_straight(vert_length*2/9),            roll_angle(0) },
-            { path_straight(vert_length*2/9),            roll_angle(90) },
-            { path_straight(vert_length*1/9),            roll_angle(0) },
-            { path_straight(vert_length*2/9),            roll_angle(90) },
-            { path_straight(vert_length*2/9),            roll_angle(0) },
-            { path_vertical_arc(radius, 90),             roll_angle(0) },            
-      })
-end
-
-function p23_12(radius, height, arg3, arg4)   -- 1/2 square
-   return make_paths("p23_12", {
-            { path_vertical_arc(-radius, 90),         roll_angle(0) },
-            { path_straight((height-2*radius)/3),     roll_angle(0) },
-            { path_straight((height-2*radius)/3),     roll_angle(180) },
-            { path_straight((height-2*radius)/3),     roll_angle(0) },
-            { path_vertical_arc(-radius, 90),         roll_angle(0) },              
-      })
-end
-
-function p23_13(radius, height, arg3, arg4)  -- stall turn
-   return make_paths("p23_13", {
-            { path_vertical_arc(radius, 90),          roll_angle(0) },
-            { path_straight((height-2*radius)/3),     roll_angle(0) },
-            { path_straight((height-2*radius)/3),     roll_angle(90) },
-            { path_straight((height-2*radius)/3),     roll_angle(0) },
-            { path_vertical_arc(-radius, 90),         roll_angle(0) },
-            { path_straight((height-2*radius)/3),     roll_angle(0) },
-            { path_straight((height-2*radius)/3),     roll_angle(90) },
-            { path_straight((height-2*radius)/3),     roll_angle(0) },
-            { path_vertical_arc(-radius, 90),         roll_angle(0) },          
-      })
-end
-
-function p23_13a(radius, height, arg3, arg4)  -- stall turn PLACE HOLDER
-   assert(height >= 2*radius)
-   local rabs = math.abs(radius)
-   return make_paths("P23_13a", {
-            { path_vertical_arc(radius, 90),          roll_angle(0) },
-            { path_straight((height-2*rabs)/3),       roll_angle(0) },
-            { path_straight((height-2*rabs)/3),       roll_angle(90),  roll_ref=90 },
-            { path_straight((height-2*rabs)/3),       roll_angle(0) },
-            { path_vertical_arc(-radius, 180),        roll_angle(0) },
-            { path_straight((height-2*rabs)/3),       roll_angle(0) },
-            { path_straight((height-2*rabs)/3),       roll_angle(90),  roll_ref=-90 },
-            { path_straight((height-2*rabs)/3),       roll_angle(0) },
-            { path_vertical_arc(radius, 90),          roll_angle(0), roll_ref=180 },
-     })
-end
-
-
-function p23_14(r, h, arg3, arg4)   -- fighter turn
-   assert(h >= 2*r)
-   local rabs = math.abs(r)
-   local angle_length = (h - ((0.2929 * rabs)) / (math.sin(math.rad(45)))) - rabs
-   return make_paths("fighter_turn", {
-            { path_vertical_arc(r, 45),              roll_angle(0) },
-            { path_straight((angle_length)/3),       roll_angle(0) },
-            { path_straight((angle_length)/3),       roll_angle(-90),  roll_ref=90 },
-            { path_straight((angle_length)/3),       roll_angle(0) },
-            { path_vertical_arc(r, 180),             roll_angle(0) },
-            { path_straight((angle_length)/3),       roll_angle(0) },
-            { path_straight((angle_length)/3),       roll_angle(90), roll_ref=-90 },
-            { path_straight((angle_length)/3),       roll_angle(0) },
-            { path_vertical_arc(-r, 45),             roll_angle(0), roll_ref=180 },
-   })
-end                            
-
-function p23_15(radius, height, arg3, arg4)   -- triangle
-   local h1 = radius * math.sin(math.rad(45))
-   local h2 = (2 * radius) - (radius * math.cos(math.rad(45)))
-   local h3 = height - (2 * radius)
-   local side = h3 / math.cos(math.rad(45))
-   --local base = (h3 + (2 * (radius - radius * math.cos(math.rad(45))))) - (2 * radius)   
-   local base = (2 * (h3 + radius)) - 2 * radius
-   return make_paths("p23_15", {
-            { path_straight(base * 1/5),                   roll_angle(180) },
-            { path_straight(base * 2/5),                   roll_angle(0) },         
-            { path_vertical_arc(radius, 135) ,             roll_angle(0) },
-            { path_straight(side*2/9),                     roll_angle(0) },
-            { path_straight(side*2/9),                     roll_angle(90) },
-            { path_straight(side*1/9),                     roll_angle(0) },
-            { path_straight(side*2/9),                     roll_angle(90) },
-            { path_straight(side*2/9),                     roll_angle(0) },
-            { path_vertical_arc(radius, 90),               roll_angle(0) },
-            { path_straight(side*2/9),                     roll_angle(0) },
-            { path_straight(side*2/9),                     roll_angle(90) },
-            { path_straight(side*1/9),                     roll_angle(0) },
-            { path_straight(side*2/9),                     roll_angle(90) },
-            { path_straight(side*2/9),                     roll_angle(0) },
-            { path_vertical_arc(radius, 135),              roll_angle(0) },
-            { path_straight(base * 2/5),                   roll_angle(0) }, 
-            { path_straight(base * 1/5),                   roll_angle(180) },
-            { path_straight(base * 2/5),                   roll_angle(0) },  
-      })
-end
-
-function p23_16(radius, height, arg3, arg4)   -- sharks tooth
-   local angle_length = (height - 2 * (radius - (radius * math.cos(math.rad(45))))) / math.cos(math.rad(45))
-   local vert_length = height - (2 * radius)
-   return make_paths("p23_16", {
-            { path_vertical_arc(radius, 90),         roll_angle(0) },
-            { path_straight((vert_length)/3),        roll_angle(0) },
-            { path_straight((vert_length)/3),        roll_angle(180) },
-            { path_straight((vert_length)/3),        roll_angle(0) },           
-            { path_vertical_arc(radius, 135),        roll_angle(0) },
-            { path_straight(angle_length*2/9),       roll_angle(0) },
-            { path_straight(angle_length*2/9),       roll_angle(90) },
-            { path_straight(angle_length*1/9),       roll_angle(0) },
-            { path_straight(angle_length*2/9),       roll_angle(90) },
-            { path_straight(angle_length*2/9),       roll_angle(0) },
-            { path_vertical_arc(-radius, 45),        roll_angle(0), roll_ref=180 },
-      })
-end
-
-function p23_17(radius, arg2, arg3, arg4)   -- loop
-   return make_paths("p23_17", {
-            { path_vertical_arc(radius, 135),      roll_angle(0) },
-            { path_vertical_arc(radius, 90),       roll_angle(180) },
-            { path_vertical_arc(radius, 135),      roll_angle(0), roll_ref=180 },
-      })
-end
-
-function half_roll(arg1, arg2, arg3, arg4)   -- half roll for testing inverted manouvers
-   return make_paths("half_roll", {
-            { path_straight(40),             roll_angle(180) },
-            { path_straight(10),             roll_angle(0) },   
-      })
-end
-
-function fai_f3a_box_l_r()
-   return path_composer("f3a_box_l_r", {     -- positioned for a flight line 150m out. Flight line 520m total length.
-                                             -- Script start point is ON CENTER, with the model heading DOWNWIND!
-          { straight_roll,              { 150,   0 } },
-          { half_reverse_cuban_eight,   { 95 } },
-          { straight_align,             { 0, 0 } },
-          { vertical_aerobatic_box,     { 540, 190, 45,  0 },     message="Starting Box Demo"},
-          { vertical_aerobatic_box,     { 540, 190, 45,  0 } },
-          { vertical_aerobatic_box,     { 540, 190, 45,  0 } },
-          { vertical_aerobatic_box,     { 540, 190, 45,  0 } },
-          { straight_roll,              { 50, 0 } }
-   })
-end
-
---[[
-   NZ clubman schedule
---]]
-function nz_clubman()                               -- positioned for a flight line 100m out
-                                                    -- Script start point is ON CENTER, with the model heading DOWNWIND!
-   return path_composer("nz_clubman_l_r", {
-          --[[
-          { straight_roll,            { 20,  0 } },
-          { procedure_turn,           { 20, 45, 60 } },
-          { straight_roll,            { 150, 0 } },
-          { half_reverse_cuban_eight, { 40 } },
-          { straight_roll,            { 150, 0 } },
-          --]]
-          { straight_roll,            { 150,   0 } },
-          { half_reverse_cuban_eight, { 90 } },
-          { straight_align,           { 0, 0 } },
-          { cuban_eight,              { 90 },          message="Cuban Eight"},
-          { straight_align,           { -100, 0 } },
-          { half_reverse_cuban_eight, { 90 } },
-          { straight_align,           { 40, 0 } },
-          { half_reverse_cuban_eight, { 90 },          message="Half Rev Cuban"},
-          { straight_align,           { -180, 0 } },
-          { half_reverse_cuban_eight, { 90 } },
-          { straight_align,           { -120, 0 } },
-          { two_point_roll,           { 240 },         message="Two Point Roll"},
-          { straight_align,           { 150, 0 } },
-          { half_reverse_cuban_eight, { 90 } },
-          { straight_align,           { 106, 0 } },
-          { upline_45,                { 40, 180 },     message="45 Upline"},
-          { straight_align,           { -180, 0 } },                          -- missing the stall turn
-          { split_s,                  { 90, 90 } },
-          { straight_align,           { -120, 0 } },
-          { straight_roll,            { 240, 1 },      message="Slow Roll"},
-          { straight_align,           { 150, 0 } },
-          { half_cuban_eight,         { 90 } },
-          { straight_align,           { 0, 0 } },
-          { loop,                     { 90, 0, 2 },    message="Two Loops"},
-          { straight_align,           { -180, 0 } },
-          { immelmann_turn,           { 90, 90 } },
-          { straight_align,           { -106, 0 } },
-          { downline_45,              { 40, 180 },     message="45 Downline"},
-          { straight_align,           { 150, 0 } },
-          { half_cuban_eight,         { 90 } },
-          { straight_roll,            { 100, 0 } },
-   })
-end
-
---[[
-   F3A p23, preliminary schedule 2023
---]]
-function f3a_p23_l_r()
-   return path_composer("f3a_p23_l_r", {            -- positioned for a flight line 150m out. Flight line 520m total length.
-                                                    -- Script start point is ON CENTER, with the model heading DOWNWIND!
-          { straight_roll,              { 160,   0 } },
-          { half_reverse_cuban_eight,   { 80 } },
-          { straight_align,             { 140, 0 } },
-          { p23_1,                      { 40, 200, 200 },  message="Top Hat"}, 
-          { straight_align,             { -220, 0 } },
-          { p23_2,                      { 40, 200 },       message="Half Square Loop"},     
-          { straight_align,             { 0, 0 } },
-          { p23_3,                      { 40, 200 },       message="Humpty"},    
-          { straight_align,             { 160, 0 } },
-          { p23_4,                      { 40, 200 },       message="Half Square on Corner"},   
-          { straight_align,             { 116, 0 } },
-          { p23_5,                      { 40, 200 },       message="45 Up"},                        -- snap roll
-          { straight_align,             { -185, 0 } },
-          { p23_6,                      { 40, 200 },       message="Half Eight Sided Loop"},  
-          { straight_align,             { -100, 0 } },    
-          { p23_7,                      { 200 },           message="Roll Combination"},      
-          { straight_align,             { 160, 0 } },
-          { p23_8,                      { 100 },           message="Immelmann Turn"},      
-          { straight_align,             { 40, 0 } },
-          { p23_9,                      { 40, 200 },       message="Should be a Spin"},            -- spin
-          { straight_align,             { -140, 0 } },
-          { p23_10,                     { 40, 200 },       message="Humpty"}, 
-          { straight_align,             { -91, 0 } },
-          { p23_11,                     { 50, 200 },       message="Laydown Loop"},  
-          { straight_align,             { 220, 0 } },
-          { p23_12,                     { 40, 200 },       message="Half Square Loop"},   
-          { straight_align,             { 40, 0 } },
-          { p23_13a,                    { 40, 200 },       message="Stall Turn"},                  -- stall turn    
-          { straight_roll,              { 100,   0 } },      
-          { p23_14,                     { 40, 180 },       message="Fighter Turn"},                  
-          { straight_align,             { -24, 0 } },
-          { p23_15,                     { 40, 200 },       message="Triangle"},   
-          { straight_align,             { 220, 0 } },
-          { p23_16,                     { 40, 160 },       message="Sharks Tooth"},    
-          { straight_align,             { 0, 0 } },
-          { p23_17,                     { 100 },           message="Loop"},  
-          { straight_roll,              { 100, 0 } },
-    })
-end
-
---[[
-   F4C Scale Schedule Example
---]]
-
-function f4c_example_l_r()                          -- positioned for a flight line nominally 150m out (some manouvers start 30m out)
-                                                    -- Script start point is ON CENTER @ 150m, with the model heading DOWNWIND ie flying Right to Left!
-   return path_composer("f4c_example", {    
-         { straight_roll,             { 320,   0 } },
-         { half_climbing_circle,      { -70, 0, -60 } },            -- come in close for the first two manouvers
-         --{ straight_roll,             { 10,   0 } },
-         { straight_align,            { 280, 0 } },
-         { scale_figure_eight,        { -140, -30 },        message="Scale Figure Eight"},   
-         { straight_roll,             { 80,   0 } },
-         { immelmann_turn,            { 90       } }, 
-         { straight_align,            { 0, 0 } },
-         --{ straight_roll,             { 340,   0 } },
-         { climbing_circle,           { 140, -205, 30 },    message="Descending 360"},   
-         { straight_roll,             { 40,   0 } },
-         { upline_20,                 { 80, 25 } },                  -- Climb up 25m to base height
-         { straight_roll,             { 50,   0 } },
-         { half_climbing_circle,      { 70, 0, 60 } },               -- Go back out to 150m
-         { straight_align,            { 0, 0 } },
-         { loop,                      { 90,    0, 1 },      message="Loop"},       
-         { straight_align,            { -50, 0 } },
-         { half_reverse_cuban_eight,  { 90       } },
-         { straight_align,            { 0, 0 } },
-         { immelmann_turn,            { 90       },         message="Immelmann Turn"},    
-         { straight_align,            { -140, 0 } },
-         { split_s,                   { 90       } },
-         { straight_align,            { 0, 0 } },
-         { half_cuban_eight,          { 90       },         message="Half Cuban Eight"},  
-         { straight_align,            { -180, 0 } },
-         { half_climbing_circle,      { 70, 0, 60 } },  
-         --{ straight_roll,             { 115,   0 } }, 
-         { straight_align,            { -90, 0 } },         
-         { derry_turn,                { 90,   60 },         message="Derry Turn"}, 
-         { straight_roll,             { 200,   0 } },           
-         { half_climbing_circle,      { -90, 0, -60 } },   
-         { straight_align,            { 0, 0 } },         
-         { climbing_circle,           { -140,    0, -30 },  message="Gear Demo"}, 
-         { straight_roll,             { 250,   0 } },
-         { half_climbing_circle,      { -100, 0, -60 } },
-         { straight_align,            { -185, 0 } },
-         { barrel_roll,               { 90, 240, 1 },      message="Barrel Roll"},  
-         { straight_roll,             { 60,    0 } },
-         { half_reverse_cuban_eight,  { 90       }},
-         { straight_roll,             { 60,    0 } },
-   })
-end
-
---[[
-   simple air show
---]]
-
-function air_show1()
-   return path_composer("AirShow", {
-         { loop,                      {  25, 0, 1 }, message="Loop"},
-         { straight_align,            {  80, 0 } },
-         { half_reverse_cuban_eight,  {  25       }, message="HalfReverseCubanEight" },
-         { straight_align,            {  80 } },
-         { scale_figure_eight,        { -40, -45 },  message="ScaleFigureEight" },
-         { immelmann_turn,            {  30       }, message="Immelmann" },
-         { straight_align,            { -40, 0 } },
-         { straight_roll,             {  80, 2 },    message="Roll" },
-         { straight_align,            { 120, 0 } },
-         { split_s,                   {  30       }, message="Split-S"},
-         { straight_align,            {   0 } },
-         { rolling_circle,            { -50, 3},     message="RollingCircle" },
-         { straight_align,            { -50, 0 } },
-         { humpty_bump,               {  20, 60 },   message="HumptyBump" },
-         { straight_align,            {  80, 0 } },
-         { half_cuban_eight,          {  25       }, message="HalfCubanEight" },
-         { straight_align,            {  75, 0 } },
-         { upline_45,                 {  30, 50 },   message="Upline45", },
-         { downline_45,               {  30, 50 },   message="Downline45" },
-         { half_reverse_cuban_eight,  {  25       }, message="HalfReverseCubanEight" },
-         { straight_align,            {   0 } },
-   })
-end
-
-function air_show3()
-   return path_composer("AirShow3", {
-           { air_show1, {}, message="AirShowPt1" },
-           { air_show1, {}, message="AirShowPt2" },
-           { air_show1, {}, message="AirShowPt3" },
-   })
-end
-
-function test_all_paths()
-   return path_composer("test_all_paths", {
-          { figure_eight,             { 100,  45 } },
-          { straight_roll,            { 20,    0 } },
-          { loop,                     { 30,    0,  1 } },
-          { straight_roll,            { 20,    0 } },
-          { horizontal_rectangle,     { 100, 100, 20, 45 } },
-          { straight_roll,            { 20,    0 } },
-          { climbing_circle,          { 100,  20, 45 } },
-          { straight_roll,            { 20,    0 } },
-          { vertical_aerobatic_box,   { 100, 100, 20,  0 } },
-          { straight_roll,            { 20,    0 } },
-          { rolling_circle,           { 100,   2,  0,  0 } },
-          { straight_roll,            { 20,    0 } },
-          { half_cuban_eight,         { 30,      } },
-          { straight_roll,            { 20,    0 } },
-          { half_reverse_cuban_eight, { 30,      } },
-          { straight_roll,            { 20,    0 } },
-          { cuban_eight,              { 30,      } },
-          { straight_roll,            { 20,    0 } },
-          { humpty_bump,              { 30,  100 } },
-          { straight_flight,          { 100,  45 } },
-          { scale_figure_eight,       { 100,  45 } },
-          { straight_roll,            { 20,    0 } },
-          { immelmann_turn,           { 30,   60 } },
-          { straight_roll,            { 20,    0 } },
-          { split_s,                  { 30,   60 } },
-          { straight_roll,            { 20,    0 } },
-          { upline_45,                { 20,   50 } },
-          { straight_roll,            { 20,    0 } },
-          { downline_45,              { 20,   50 } },
-          { straight_roll,            { 20,    0 } },
-          { procedure_turn,           { 40, 45, 20 } },
-          { straight_roll,            { 20,    0 } }, 
-          { two_point_roll,           { 100      } },
-          { straight_roll,            { 20,    0 } },
-          { derry_turn,               { 40,   60 } },
-          { straight_roll,            { 20,    0 } },
-          { half_climbing_circle,     { -65, 0, -60 } },
-          { straight_roll,            { 20,    0 } },
-          --[[
-          { p23_1,                    { 20, 150, 150 } }, 
-          { straight_roll,            { 20,    0 } },
-          { p23_2,                    { 20,  150 } },      
-          { straight_roll,            { 20,    0 } },
-          { p23_3,                    { 20,  150 } },      
-          { straight_roll,            { 20,    0 } },
-          { p23_4,                    { 20,  150 } },      
-          { straight_roll,            { 20,    0 } },
-          { p23_5,                    { 20,  150 } },   
-          { straight_roll,            { 20,    0 } },
-          { p23_6,                    { 20,  150 } },       -- now inverted :-)
-          { straight_roll,            { 20,    0 } },
-          --]]
-   })
 end
 
 ---------------------------------------------------
@@ -1774,10 +1619,27 @@ function rotate_path(path_f, t, orientation, offset)
    local point = path_f.get_pos(t)
    local angle = path_f.get_roll(t)
    local roll_correction = path_f.get_roll_correction(t)
-   local speed = path_f.get_speed(t)
-   local thr_boost = path_f.get_throttle_boost(t)
+
+   local attrib = {}
+   for k, v in pairs(path_attribs) do
+      attrib[v] = path_f.get_attribute(t, v)
+   end
+   point = point + path_var.path_shift
    local point = quat_earth_to_body(orientation, point)
-   return point+offset, math.rad(angle+roll_correction), speed, thr_boost
+
+   local scale = AEROM_PATH_SCALE:get()
+   point = point:scale(math.abs(scale))
+   if scale < 0 then
+      -- we need to mirror the path
+      point:y(-point:y())
+      roll_correction = -roll_correction
+      angle = -angle
+      -- compensate path orientation for the mirroring
+      local orient = orientation:inverse()
+      point = quat_body_to_earth((orient * orient), point)
+   end
+
+   return point+offset, math.rad(angle+roll_correction), attrib
 end
 
 --Given vec1, vec2, returns an (rotation axis, angle) tuple that rotates vec1 to be parallel to vec2
@@ -1879,6 +1741,7 @@ function quat_projection_ground_plane(q)
    return 2.0 * (q3q4 + q1q2)
 end
 
+
 path_var.count = 0
 
 function do_path()
@@ -1905,13 +1768,12 @@ function do_path()
       local speed = target_groundspeed()
       path_var.target_speed = speed
 
-      path_var.length = path.get_length()
+      path_var.length = path.get_length() * math.abs(AEROM_PATH_SCALE:get())
 
       path_var.total_rate_rads_ef = makeVector3f(0.0, 0.0, 0.0)
 
       --assuming constant velocity
       path_var.total_time = path_var.length/speed
-      path_var.last_pos = path.get_pos(0) --position at t0
 
       --deliberately only want yaw component, because the maneuver should be performed relative to the earth, not relative to the initial orientation
       path_var.initial_ori = Quaternion()
@@ -1925,7 +1787,6 @@ function do_path()
       path_var.path_int = path_var.start_pos:copy()
 
       speed_PI.reset()
-
 
       path_var.accumulated_orientation_rel_ef = path_var.initial_ori
 
@@ -1943,11 +1804,12 @@ function do_path()
 
       path_var.pos = path_var.initial_ef_pos:copy()
       path_var.roll = 0.0
-      path_var.speed = nil
+      path_var.last_shift_xy = nil
+      path_var.path_shift = Vector3f()
 
       -- get initial tangent
-      local p1, r1, s1 = rotate_path(path, path_var.path_t + 0.1/(path_var.total_time*LOOP_RATE),
-                                     path_var.initial_ori, path_var.initial_ef_pos)
+      local p1, r1 = rotate_path(path, path_var.path_t + 0.1/(path_var.total_time*LOOP_RATE),
+                                 path_var.initial_ori, path_var.initial_ef_pos)
       path_var.tangent = p1 - path_var.pos
       return true
    end
@@ -1962,7 +1824,7 @@ function do_path()
 
    path_var.last_time = now
 
-   local local_n_dt = actual_dt/path_var.total_time
+   local local_n_dt = (1.0/LOOP_RATE)/path_var.total_time
 
    if path_var.path_t + local_n_dt > 1.0 then
       -- all done
@@ -1978,11 +1840,38 @@ function do_path()
 
    local p0 = path_var.pos:copy()
    local r0 = path_var.roll
-   local s0 = path_var.speed
-   local p1, r1, s1 = rotate_path(path, path_var.path_t + local_n_dt,
-                                  path_var.initial_ori, path_var.initial_ef_pos)
+   local p1, r1, attrib = rotate_path(path, path_var.path_t + local_n_dt,
+                                      path_var.initial_ori, path_var.initial_ef_pos)
 
    local current_measured_pos_ef = ahrs_pos_NED:copy()
+
+   if attrib.rate_override ~= nil then
+      if not attrib.rate_override.update(path, path_var.path_t + local_n_dt, path_var.target_speed) then
+         -- not done yet
+         path_var.pos = current_measured_pos_ef
+         return true
+      end
+   end
+
+   --[[
+      see if this path element has a shift_xy attribute
+   --]]
+   local shift_xy = attrib.shift_xy
+   if shift_xy and not path_var.last_shift_xy then
+      --[[
+         we have entered a new sub-element with a shift_xy
+      --]]
+      local curpos_mf = quat_body_to_earth(path_var.initial_ori, current_measured_pos_ef)
+      local pathpos_mf = quat_body_to_earth(path_var.initial_ori, p1)
+      local shift = curpos_mf - pathpos_mf
+      shift:z(0)
+      path_var.path_shift = path_var.path_shift + shift
+      local shift_ef = quat_earth_to_body(path_var.initial_ori, shift)
+      p1 = p1 + shift_ef
+      p0:y(p1:y())
+      p0:x(p1:x())
+   end
+   path_var.last_shift_xy = shift_xy
 
    --[[
       get tangents to the path
@@ -2016,10 +1905,9 @@ function do_path()
    --[[
       recalculate the current path position and angle based on actual delta time
    --]]
-   local p1, r1, s1, thr_boost = rotate_path(path,
-                                             constrain(path_var.path_t + path_t_delta, 0, 1),
-                                             path_var.initial_ori, path_var.initial_ef_pos)
-
+   local p1, r1, attrib = rotate_path(path,
+                                      constrain(path_var.path_t + path_t_delta, 0, 1),
+                                      path_var.initial_ori, path_var.initial_ef_pos)
    local last_path_t = path_var.path_t
    path_var.path_t = path_var.path_t + path_t_delta
 
@@ -2048,10 +1936,9 @@ function do_path()
    path_var.path_t = path_var.path_t + TIME_CORR_P:get() * path_err_t
 
    -- get the path again with the corrected time
-   p1, r1, s1 = rotate_path(path,
-                            constrain(path_var.path_t, 0, 1),
-                            path_var.initial_ori, path_var.initial_ef_pos)
-
+   p1, r1, attrib = rotate_path(path,
+                                constrain(path_var.path_t, 0, 1),
+                                path_var.initial_ori, path_var.initial_ef_pos)
    -- recalculate the tangent to match the amount we advanced the path time
    tangent2_ef = p1 - p0
 
@@ -2067,7 +1954,6 @@ function do_path()
    path_var.tangent = tangent2_ef:copy()
    path_var.pos = p1:copy()
    path_var.roll = r1
-   path_var.speed = s1
 
    
    --[[
@@ -2084,6 +1970,9 @@ function do_path()
 
    -- gains for error correction.
    local acc_err_ef = B:scale(ERR_CORR_P:get()) + B_dot:scale(ERR_CORR_D:get())
+
+   -- scale by per-maneuver error correction scale factor
+   acc_err_ef = acc_err_ef:scale(attrib.pos_corr or 1.0)
 
    local acc_err_bf = quat_earth_to_body(ahrs_quat, acc_err_ef)
 
@@ -2254,12 +2143,7 @@ function do_path()
 
    --[[
       run the throttle based speed controller
-   --]]
-   if s1 == nil then
-      s1 = path_var.target_speed
-   end
 
-   --[[
       get the anticipated pitch at the throttle lookahead time
       we use the maximum of the current path pitch and the anticipated pitch
    --]]
@@ -2268,9 +2152,9 @@ function do_path()
    local qnew = qchange * orientation_rel_ef_with_roll_angle
    local anticipated_pitch_rad = math.max(qnew:get_euler_pitch(), orientation_rel_ef_with_roll_angle:get_euler_pitch())
 
-   local throttle = speed_PI.update(s1, anticipated_pitch_rad)
+   local throttle = speed_PI.update(path_var.target_speed, anticipated_pitch_rad)
    local thr_min = AEROM_THR_MIN:get()
-   if thr_boost then
+   if attrib.thr_boost then
       thr_min = math.max(thr_min, AEROM_THR_BOOST:get())
    end
    throttle = constrain(throttle, thr_min, 100.0)
@@ -2322,25 +2206,13 @@ command_table[18]= PathFunction(downline_45, "Downline-45")
 command_table[19]= PathFunction(stall_turn, "Stall Turn")
 command_table[20]= PathFunction(procedure_turn, "Procedure Turn")
 command_table[21]= PathFunction(derry_turn, "Derry Turn")
-command_table[22]= PathFunction(two_point_roll, "Two Point Roll")
 command_table[23]= PathFunction(half_climbing_circle, "Half Climbing Circle")
-command_table[24]= PathFunction(crossbox_humpty, "Crossbox Humpty")
 command_table[25]= PathFunction(laydown_humpty, "Laydown Humpty")
 command_table[26]= PathFunction(barrel_roll, "Barrel Roll")
 command_table[27]= PathFunction(straight_flight, "Straight Hold")
 command_table[28]= PathFunction(partial_circle, "Partial Circle")
-command_table[29]= PathFunction(four_point_roll, "Four Point Roll")
-command_table[30]= PathFunction(eight_point_roll, "Eight Point Roll")
 command_table[31]= PathFunction(multi_point_roll, "Multi Point Roll")
 command_table[32]= PathFunction(side_step, "Side Step")
-command_table[200] = PathFunction(test_all_paths, "Test Suite")
-command_table[201] = PathFunction(nz_clubman, "NZ Clubman")
-command_table[202] = PathFunction(f3a_p23_l_r, "FAI F3A P23 L to R")
-command_table[203] = PathFunction(f4c_example_l_r, "FAI F4C Example L to R")
-command_table[204] = PathFunction(air_show1, "AirShow")
-command_table[205] = PathFunction(fai_f3a_box_l_r, "FAI F3A Aerobatic Box Demonstration")
-command_table[206] = PathFunction(air_show3, "AirShow3")
-
 
 --[[
    a table of function available in loadable tricks
@@ -2365,10 +2237,8 @@ load_table["upline_45"] = upline_45
 load_table["downline_45"] = downline_45
 load_table["stall_turn"] = stall_turn
 load_table["procedure_turn"] = procedure_turn
-load_table["derry_turn"] = derry_turn
 load_table["two_point_roll"] = two_point_roll
 load_table["half_climbing_circle"] = half_climbing_circle
-load_table["crossbox_humpty"] = crossbox_humpty
 load_table["laydown_humpty"] = laydown_humpty
 load_table["straight_align"] = straight_align
 load_table["figure_eight"] = figure_eight
@@ -2377,14 +2247,62 @@ load_table["straight_hold"] = straight_hold
 load_table["partial_circle"] = partial_circle
 load_table["multi_point_roll"] = multi_point_roll
 load_table["side_step"] = side_step
-load_table["p23_1a"] = p23_1a
-load_table["p23_1"] = p23_1
-load_table["p23_13a"] = p23_13a
-load_table["p23_14"] = p23_14
-load_table["p23_15"] = p23_15
-load_table["p23_16"] = p23_16
-load_table["p23_17"] = p23_17
+load_table["align_box"] = align_box
+load_table["align_center"] = align_center
 
+--[[
+   interpret an attribute value, coping with special cases
+--]]
+function interpret_attrib(v)
+   if v == "true" then
+      return true
+   end
+   if v == "false" then
+      return false
+   end
+   -- could be a number
+   local n = tonumber(v)
+   if n ~= nil then
+      return n
+   end
+   -- assume a string
+   return v
+end
+
+--[[
+   parse a function definition in a txt load file, adding it to the load table so
+   it can be used in schedules
+--]]
+function parse_function(line, file)
+   _, _, funcname = string.find(line, "^function%s*([%w_]+).*$")
+   if not funcname then
+      gcs:send_text(0, string.format("Parse error: %s", line))
+      return
+   end
+   local funcstr = line .. "\n"
+   while true do
+      local line = file:read()
+      if not line then
+         gcs:send_text(0, string.format("Error: end of file in %s", funcname))
+         break
+      end
+      funcstr = funcstr .. line .. "\n"
+      if string.sub(line,1,3) == "end" then
+         break
+      end
+   end
+   local f, errloc, err = load(funcstr, funcname, "t", _ENV)
+   if not f then
+      gcs:send_text(0,string.format("Error %s: %s", errloc, err))
+      return
+   end
+   -- fun the function code, which creates the function
+   local success, err = pcall(f)
+   if not success then
+      gcs:send_text(0,string.format("Error %s: %s", funcname, err))
+   end
+   load_table[funcname] = _ENV[funcname]
+end
 
 --[[
    load a trick description from a text file
@@ -2409,20 +2327,29 @@ function load_trick(id)
       return
    end
    local name = string.format("Trick%u", id)
+   local attrib = {}
    local paths = {}
-   local message = nil
    while true do
       local line = file:read()
       if not line then
          break
       end
+      -- trim trailing spaces
+      line = string.gsub(line, '^(.-)%s*$', '%1')
       local _, _, cmd, arg1, arg2, arg3, arg4 = string.find(line, "^([%w_:]+)%s*([-.%d]*)%s*([-.%d]*)%s*([-.%d]*)%s*([-.%d]*)")
       if cmd == "" or cmd == nil or string.sub(cmd,1,1) == "#" then
          -- ignore comments
       elseif cmd == "name:" then
          _, _, name = string.find(line, "^name:%s*([%w_]+)$")
-      elseif cmd == "message:" then
-         _, _, message = string.find(line, "^message:%s*(.+)$")
+      elseif string.sub(cmd,-1) == ":" then
+         _, _, a, s = string.find(line, "^([%w_]+):%s*([%w_%s-]+)$")
+         if a ~= nil then
+            attrib[a] = interpret_attrib(s)
+         else
+            gcs:send_text(0,"Bad line: '%s'", line)
+         end
+      elseif cmd == "function" then
+         parse_function(line, file)
       elseif cmd ~= nil then
          arg1 = tonumber(arg1) or 0
          arg2 = tonumber(arg2) or 0
@@ -2433,10 +2360,10 @@ function load_trick(id)
             gcs:send_text(0,string.format("Unknown command '%s' in %s", cmd, fname))
          else
             paths[#paths+1] = { f, { arg1, arg2, arg3, arg4 }}
-            if message ~= nil then
-               paths[#paths].message = message
-               message = nil
+            for k, v in pairs(attrib) do
+               paths[#paths][k] = v
             end
+            attrib = {}
          end
       end
    end
@@ -2446,7 +2373,7 @@ function load_trick(id)
 end
 
 function PathTask(fn, name, id, initial_yaw_deg, arg1, arg2, arg3, arg4)
-   self = {}
+   local self = {}
    if type(fn) == "table" then
       self.fn = fn
    else
@@ -2616,4 +2543,5 @@ function update()
    return update, 1000.0/LOOP_RATE
 end
 
+gcs:send_text(0, string.format("Loaded plane_aerobatics.lua"))
 return update()
