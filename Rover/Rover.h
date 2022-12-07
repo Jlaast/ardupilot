@@ -74,6 +74,7 @@ public:
     friend class ParametersG2;
     friend class AP_Rally_Rover;
     friend class AP_Arming_Rover;
+    
 #if ADVANCED_FAILSAFE == ENABLED
     friend class AP_AdvancedFailsafe_Rover;
 #endif
@@ -89,6 +90,8 @@ public:
     friend class ModeRTL;
     friend class ModeSmartRTL;
     friend class ModeFollow;
+    friend class ModeFollowx;
+    friend class ModeFollowy;
     friend class ModeSimple;
 #if MODE_DOCK_ENABLED == ENABLED
     friend class ModeDock;
@@ -234,6 +237,8 @@ private:
     ModeRTL mode_rtl;
     ModeSmartRTL mode_smartrtl;
     ModeFollow mode_follow;
+    ModeFollowx mode_followx;
+    ModeFollowy mode_followy;
     ModeSimple mode_simple;
 #if MODE_DOCK_ENABLED == ENABLED
     ModeDock mode_dock;
