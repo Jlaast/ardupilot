@@ -534,6 +534,12 @@ Mode *Rover::mode_from_mode_num(const enum Mode::Number num)
     case Mode::Number::FOLLOW:
         ret = &mode_follow;
         break;
+    case Mode::Number::FOLLOWX:
+        ret = &mode_followx;
+        break;       
+    case Mode::Number::FOLLOWY:
+        ret = &mode_followy;
+        break;          
     case Mode::Number::SIMPLE:
         ret = &mode_simple;
         break;
